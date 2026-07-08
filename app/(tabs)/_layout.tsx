@@ -23,11 +23,10 @@ export default function TabLayout() {
           title: 'Tab One',
           tabBarIcon: ({ color }) => (
             <SymbolView
-              name={{
+              name={Platform.select({
                 ios: 'chevron.left.forwardslash.chevron.right',
-                android: 'code',
-                web: 'code',
-              }}
+                default: 'code',
+              }) as any}
               tintColor={color}
               size={28}
             />
@@ -37,7 +36,7 @@ export default function TabLayout() {
               <Pressable style={{ marginRight: 15 }}>
                 {({ pressed }) => (
                   <SymbolView
-                    name={{ ios: 'info.circle', android: 'info', web: 'info' }}
+                    name={Platform.select({ ios: 'info.circle', default: 'info' }) as any}
                     size={25}
                     tintColor={Colors[colorScheme].text}
                     style={{ opacity: pressed ? 0.5 : 1 }}
@@ -54,11 +53,10 @@ export default function TabLayout() {
           title: 'Tab Two',
           tabBarIcon: ({ color }) => (
             <SymbolView
-              name={{
+              name={Platform.select({
                 ios: 'chevron.left.forwardslash.chevron.right',
-                android: 'code',
-                web: 'code',
-              }}
+                default: 'code',
+              }) as any}
               tintColor={color}
               size={28}
             />

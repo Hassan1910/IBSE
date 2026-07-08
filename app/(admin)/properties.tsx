@@ -12,7 +12,7 @@ import {
   ScrollView,
 } from 'react-native';
 import { supabase } from '../../lib/supabase';
-import { Plus, X, MapPin, Tag, Landmark, Wrench } from 'lucide-react-native';
+import { Plus, X, MapPin, Tag, Landmark, Wrench, Edit2, Trash2 } from 'lucide-react-native';
 
 interface Property {
   id: string;
@@ -38,6 +38,49 @@ export default function AdminPropertiesScreen() {
   const [price, setPrice] = useState('');
   const [location, setLocation] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+
+  const resetForm = () => {
+    setEditingId(null);
+    setTitle('');
+    setDescription('');
+    setPrice('');
+    setLocation('');
+    setType('rental');
+    setCategory('residential');
+  };
+
+  const handleEdit = (property: Property) => {
+    setEditingId(property.id);
+    setTitle(property.title);
+    setDescription(property.description);
+    setType(property.type);
+    setCategory(property.category);
+    setPrice(property.price.toString());
+    setLocation(property.location);
+    setModalVisible(true);
+  };
+
+  const handleDelete = (id: string) => {
+    Alert.alert('Delete Property', 'Are you sure you want to delete this property? This action cannot be undone.', [
+      { text: 'Cancel', style: 'cancel' },
+      { 
+        text: 'Delete', 
+        style: 'destructive', 
+        onPress: async () => {
+          try {
+            const { error } = await supabase.from('properties').delete().eq('id', id);
+            if (error) throw error;
+            Alert.alert('Success', 'Property deleted.');
+            setProperties(prev => prev.filter(p => p.id !== id));
+          } catch (err) {
+            console.error('Delete property error:', err);
+            Alert.alert('Error', 'Failed to delete property.');
+          }
+        }
+      }
+    ]);
+  };
 
   const fetchProperties = async () => {
     try {
@@ -75,29 +118,42 @@ export default function AdminPropertiesScreen() {
 
     try {
       setSubmitting(true);
-      const { error } = await supabase.from('properties').insert({
-        title: title.trim(),
-        description: description.trim(),
-        type,
-        category,
-        price: numPrice,
-        location: location.trim(),
-        status: 'available',
-      });
+      
+      if (editingId) {
+        const { error } = await supabase.from('properties')
+          .update({
+            title: title.trim(),
+            description: description.trim(),
+            type,
+            category,
+            price: numPrice,
+            location: location.trim(),
+          })
+          .eq('id', editingId);
 
-      if (error) throw error;
+        if (error) throw error;
+        Alert.alert('Success 🎉', 'Property updated successfully.');
+      } else {
+        const { error } = await supabase.from('properties').insert({
+          title: title.trim(),
+          description: description.trim(),
+          type,
+          category,
+          price: numPrice,
+          location: location.trim(),
+          status: 'available',
+        });
 
-      Alert.alert('Success 🎉', 'New property listed successfully.');
+        if (error) throw error;
+        Alert.alert('Success 🎉', 'New property listed successfully.');
+      }
+
       setModalVisible(false);
-      // Reset form
-      setTitle('');
-      setDescription('');
-      setPrice('');
-      setLocation('');
+      resetForm();
       fetchProperties();
     } catch (err: any) {
-      console.error('Add property error:', err);
-      Alert.alert('Error', 'Failed to add new property listing.');
+      console.error('Property save error:', err);
+      Alert.alert('Error', 'Failed to save property details.');
     } finally {
       setSubmitting(false);
     }
@@ -149,6 +205,17 @@ export default function AdminPropertiesScreen() {
 
                 <Text style={styles.price}>{formatPrice(item.price, item.type)}</Text>
                 <Text style={styles.desc} numberOfLines={2}>{item.description}</Text>
+
+                <View style={styles.actionRow}>
+                  <TouchableOpacity style={styles.actionBtn} onPress={() => handleEdit(item)}>
+                    <Edit2 size={14} color="#38BDF8" style={styles.actionIcon} />
+                    <Text style={styles.actionBtnText}>Edit</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={[styles.actionBtn, styles.deleteBtn]} onPress={() => handleDelete(item.id)}>
+                    <Trash2 size={14} color="#EF4444" style={styles.actionIcon} />
+                    <Text style={styles.deleteBtnText}>Delete</Text>
+                  </TouchableOpacity>
+                </View>
               </View>
             )}
             contentContainerStyle={styles.listContainer}
@@ -162,7 +229,13 @@ export default function AdminPropertiesScreen() {
             }
           />
 
-          <TouchableOpacity style={styles.fab} onPress={() => setModalVisible(true)}>
+          <TouchableOpacity 
+            style={styles.fab} 
+            onPress={() => {
+              resetForm();
+              setModalVisible(true);
+            }}
+          >
             <Plus size={24} color="#0F172A" />
           </TouchableOpacity>
         </>
@@ -178,7 +251,7 @@ export default function AdminPropertiesScreen() {
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
             <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>Add New Property Listing</Text>
+              <Text style={styles.modalTitle}>{editingId ? 'Edit Property Listing' : 'Add New Property Listing'}</Text>
               <TouchableOpacity onPress={() => setModalVisible(false)}>
                 <X size={24} color="#94A3B8" />
               </TouchableOpacity>
@@ -293,7 +366,7 @@ export default function AdminPropertiesScreen() {
                 {submitting ? (
                   <ActivityIndicator color="#0F172A" />
                 ) : (
-                  <Text style={styles.submitBtnText}>List Property</Text>
+                  <Text style={styles.submitBtnText}>{editingId ? 'Save Changes' : 'List Property'}</Text>
                 )}
               </TouchableOpacity>
             </ScrollView>
@@ -372,6 +445,43 @@ const styles = StyleSheet.create({
     color: '#94A3B8',
     fontSize: 13,
     lineHeight: 18,
+  },
+  actionRow: {
+    flexDirection: 'row',
+    marginTop: 16,
+    borderTopWidth: 1,
+    borderTopColor: '#334155',
+    paddingTop: 16,
+  },
+  actionBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 10,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#38BDF8',
+    marginRight: 6,
+  },
+  deleteBtn: {
+    borderColor: 'rgba(239, 68, 68, 0.4)',
+    backgroundColor: 'rgba(239, 68, 68, 0.05)',
+    marginRight: 0,
+    marginLeft: 6,
+  },
+  actionIcon: {
+    marginRight: 6,
+  },
+  actionBtnText: {
+    color: '#38BDF8',
+    fontWeight: '600',
+    fontSize: 13,
+  },
+  deleteBtnText: {
+    color: '#EF4444',
+    fontWeight: '600',
+    fontSize: 13,
   },
   fab: {
     position: 'absolute',

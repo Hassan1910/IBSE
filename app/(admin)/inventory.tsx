@@ -11,7 +11,7 @@ import {
   Alert,
 } from 'react-native';
 import { supabase } from '../../lib/supabase';
-import { Plus, Minus, X, Package, ShieldAlert } from 'lucide-react-native';
+import { Plus, Minus, X, Package, ShieldAlert, Edit2, Trash2 } from 'lucide-react-native';
 
 interface InventoryItem {
   id: string;
@@ -31,6 +31,43 @@ export default function AdminInventoryScreen() {
   const [quantity, setQuantity] = useState('');
   const [unit, setUnit] = useState('pcs');
   const [submitting, setSubmitting] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+
+  const resetForm = () => {
+    setEditingId(null);
+    setItemName('');
+    setQuantity('');
+    setUnit('pcs');
+  };
+
+  const handleEdit = (item: InventoryItem) => {
+    setEditingId(item.id);
+    setItemName(item.item_name);
+    setQuantity(item.quantity.toString());
+    setUnit(item.unit);
+    setModalVisible(true);
+  };
+
+  const handleDelete = (id: string) => {
+    Alert.alert('Delete Item', 'Are you sure you want to delete this inventory item?', [
+      { text: 'Cancel', style: 'cancel' },
+      { 
+        text: 'Delete', 
+        style: 'destructive', 
+        onPress: async () => {
+          try {
+            const { error } = await supabase.from('inventory').delete().eq('id', id);
+            if (error) throw error;
+            Alert.alert('Success', 'Item deleted.');
+            setInventory(prev => prev.filter(i => i.id !== id));
+          } catch (err) {
+            console.error('Delete item error:', err);
+            Alert.alert('Error', 'Failed to delete item.');
+          }
+        }
+      }
+    ]);
+  };
 
   const fetchInventory = async () => {
     try {
@@ -104,24 +141,38 @@ export default function AdminInventoryScreen() {
 
     try {
       setSubmitting(true);
-      const { error } = await supabase.from('inventory').insert({
-        item_name: itemName.trim(),
-        quantity: numQty,
-        unit: unit.trim() || 'pcs',
-        status: nextStatus,
-      });
+      
+      if (editingId) {
+        const { error } = await supabase.from('inventory')
+          .update({
+            item_name: itemName.trim(),
+            quantity: numQty,
+            unit: unit.trim() || 'pcs',
+            status: nextStatus,
+            updated_at: new Date().toISOString()
+          })
+          .eq('id', editingId);
 
-      if (error) throw error;
+        if (error) throw error;
+        Alert.alert('Success 🎉', 'Inventory item updated.');
+      } else {
+        const { error } = await supabase.from('inventory').insert({
+          item_name: itemName.trim(),
+          quantity: numQty,
+          unit: unit.trim() || 'pcs',
+          status: nextStatus,
+        });
 
-      Alert.alert('Success 🎉', 'Inventory item added.');
+        if (error) throw error;
+        Alert.alert('Success 🎉', 'Inventory item added.');
+      }
+
       setModalVisible(false);
-      setItemName('');
-      setQuantity('');
-      setUnit('pcs');
+      resetForm();
       fetchInventory();
     } catch (err: any) {
-      console.error('Add inventory item error:', err);
-      Alert.alert('Error', 'Failed to add inventory item.');
+      console.error('Save inventory item error:', err);
+      Alert.alert('Error', 'Failed to save inventory item.');
     } finally {
       setSubmitting(false);
     }
@@ -162,6 +213,12 @@ export default function AdminInventoryScreen() {
                 </View>
 
                 <View style={styles.actionGrid}>
+                  <TouchableOpacity style={styles.actionBtn} onPress={() => handleEdit(item)}>
+                    <Edit2 size={16} color="#38BDF8" />
+                  </TouchableOpacity>
+                  <TouchableOpacity style={[styles.actionBtn, styles.deleteBtn]} onPress={() => handleDelete(item.id)}>
+                    <Trash2 size={16} color="#EF4444" />
+                  </TouchableOpacity>
                   <TouchableOpacity
                     style={[styles.countBtn, styles.minusBtn]}
                     onPress={() => handleUpdateQuantity(item.id, item.quantity, -1)}
@@ -188,7 +245,13 @@ export default function AdminInventoryScreen() {
             }
           />
 
-          <TouchableOpacity style={styles.fab} onPress={() => setModalVisible(true)}>
+          <TouchableOpacity 
+            style={styles.fab} 
+            onPress={() => {
+              resetForm();
+              setModalVisible(true);
+            }}
+          >
             <Plus size={24} color="#0F172A" />
           </TouchableOpacity>
         </>
@@ -204,7 +267,7 @@ export default function AdminInventoryScreen() {
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
             <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>Track New Inventory Item</Text>
+              <Text style={styles.modalTitle}>{editingId ? 'Edit Inventory Item' : 'Track New Inventory Item'}</Text>
               <TouchableOpacity onPress={() => setModalVisible(false)}>
                 <X size={24} color="#94A3B8" />
               </TouchableOpacity>
@@ -253,7 +316,7 @@ export default function AdminInventoryScreen() {
                 {submitting ? (
                   <ActivityIndicator color="#0F172A" />
                 ) : (
-                  <Text style={styles.submitBtnText}>Add to Inventory</Text>
+                  <Text style={styles.submitBtnText}>{editingId ? 'Save Changes' : 'Add to Inventory'}</Text>
                 )}
               </TouchableOpacity>
             </View>
@@ -311,6 +374,21 @@ const styles = StyleSheet.create({
   actionGrid: {
     flexDirection: 'row',
     alignItems: 'center',
+  },
+  actionBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginHorizontal: 4,
+    borderWidth: 1,
+    borderColor: '#38BDF8',
+    backgroundColor: 'rgba(56, 189, 248, 0.05)',
+  },
+  deleteBtn: {
+    borderColor: 'rgba(239, 68, 68, 0.4)',
+    backgroundColor: 'rgba(239, 68, 68, 0.05)',
   },
   countBtn: {
     width: 36,

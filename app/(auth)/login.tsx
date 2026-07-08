@@ -221,7 +221,10 @@ export default function LoginScreen() {
             console.error('[Login] Failed to extract user ID from Supabase token');
           }
         }
-      } else if (signInAttempt.status === 'needs_second_factor') {
+      } else if (
+        signInAttempt.status === 'needs_second_factor' ||
+        (signInAttempt.status as string) === 'needs_client_trust'
+      ) {
         const factor = signInAttempt.supportedSecondFactors?.find(
           (f: any) => f.strategy === 'email_code'
         ) || signInAttempt.supportedSecondFactors?.find(
@@ -231,7 +234,11 @@ export default function LoginScreen() {
         if (factor) {
           await signIn.prepareSecondFactor({ strategy: factor.strategy as 'email_code' | 'phone_code' });
           setPendingVerification(true);
-          Alert.alert('Verification Required', `A verification code has been sent to your registered ${factor.strategy === 'email_code' ? 'email' : 'phone'}.`);
+          const alertTitle = (signInAttempt.status as string) === 'needs_client_trust' ? 'Device Verification Required' : 'Verification Required';
+          const alertMessage = (signInAttempt.status as string) === 'needs_client_trust'
+            ? `A verification code has been sent to your registered ${factor.strategy === 'email_code' ? 'email' : 'phone'} to verify your device.`
+            : `A verification code has been sent to your registered ${factor.strategy === 'email_code' ? 'email' : 'phone'}.`;
+          Alert.alert(alertTitle, alertMessage);
         } else {
           Alert.alert('Sign In Info', `Sign in status: ${signInAttempt.status}`);
         }

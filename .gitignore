@@ -39,3 +39,11 @@ yarn-error.*
 # generated native folders
 /ios
 /android
+
+# agents
+.agents/
+
+# scratch/temporary files
+pnpm-lock.yaml
+test-supabase.mjs
+

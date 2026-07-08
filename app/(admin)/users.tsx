@@ -12,7 +12,7 @@ import {
   ScrollView,
 } from 'react-native';
 import { supabase } from '../../lib/supabase';
-import { Users, X, Shield, Calendar, CreditCard } from 'lucide-react-native';
+import { Users, X, Shield, Calendar, CreditCard, Trash2 } from 'lucide-react-native';
 
 interface Profile {
   id: string;
@@ -97,6 +97,31 @@ export default function AdminUsersScreen() {
       console.error('Update role error:', err);
       Alert.alert('Error', 'Failed to update user role.');
     }
+  };
+
+  const handleDeleteUser = (id: string, fullName: string) => {
+    Alert.alert(
+      'Delete User Profile',
+      `Are you sure you want to permanently delete ${fullName}? This will also delete their leases, bookings, and payments. Their authentication account may still exist.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { 
+          text: 'Delete', 
+          style: 'destructive', 
+          onPress: async () => {
+            try {
+              const { error } = await supabase.from('profiles').delete().eq('id', id);
+              if (error) throw error;
+              Alert.alert('Success', 'User profile deleted.');
+              setUsers(prev => prev.filter(u => u.id !== id));
+            } catch (err) {
+              console.error('Delete user error:', err);
+              Alert.alert('Error', 'Failed to delete user.');
+            }
+          }
+        }
+      ]
+    );
   };
 
   const handleCreateLease = async () => {
@@ -207,6 +232,16 @@ export default function AdminUsersScreen() {
                   >
                     <Calendar size={14} color="#0F172A" style={styles.btnIcon} />
                     <Text style={styles.leaseBtnText}>Allocate Lease</Text>
+                  </TouchableOpacity>
+                )}
+                
+                {item.role !== 'admin' && (
+                  <TouchableOpacity
+                    style={[styles.btn, styles.deleteUserBtn]}
+                    onPress={() => handleDeleteUser(item.id, item.full_name)}
+                  >
+                    <Trash2 size={14} color="#EF4444" style={styles.btnIcon} />
+                    <Text style={styles.deleteUserBtnText}>Delete</Text>
                   </TouchableOpacity>
                 )}
               </View>
@@ -459,6 +494,17 @@ const styles = StyleSheet.create({
   },
   btnIcon: {
     marginRight: 6,
+  },
+  deleteUserBtn: {
+    borderColor: 'rgba(239, 68, 68, 0.4)',
+    borderWidth: 1,
+    backgroundColor: 'rgba(239, 68, 68, 0.05)',
+    marginLeft: 6,
+  },
+  deleteUserBtnText: {
+    color: '#EF4444',
+    fontWeight: '600',
+    fontSize: 13,
   },
   centered: {
     flex: 1,
