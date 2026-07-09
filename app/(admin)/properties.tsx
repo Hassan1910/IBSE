@@ -10,9 +10,12 @@ import {
   TextInput,
   Alert,
   ScrollView,
+  Image,
 } from 'react-native';
+import { useUser } from '@clerk/clerk-expo';
 import { supabase } from '../../lib/supabase';
-import { Plus, X, MapPin, Tag, Landmark, Wrench, Edit2, Trash2 } from 'lucide-react-native';
+import { pickImages, uploadImage } from '../../lib/storage';
+import { Plus, X, MapPin, Tag, Landmark, Edit2, Trash2, Camera } from 'lucide-react-native';
 
 interface Property {
   id: string;
@@ -23,13 +26,14 @@ interface Property {
   price: number;
   location: string;
   status: 'available' | 'rented' | 'sold';
+  image_urls: string[] | null;
 }
 
 export default function AdminPropertiesScreen() {
+  const { user } = useUser();
   const [properties, setProperties] = useState<Property[]>([]);
   const [loading, setLoading] = useState(true);
 
-  // New Property Form States
   const [modalVisible, setModalVisible] = useState(false);
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
@@ -37,6 +41,7 @@ export default function AdminPropertiesScreen() {
   const [category, setCategory] = useState<'residential' | 'commercial' | 'land'>('residential');
   const [price, setPrice] = useState('');
   const [location, setLocation] = useState('');
+  const [selectedImages, setSelectedImages] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
 
@@ -46,6 +51,7 @@ export default function AdminPropertiesScreen() {
     setDescription('');
     setPrice('');
     setLocation('');
+    setSelectedImages([]);
     setType('rental');
     setCategory('residential');
   };
@@ -58,28 +64,44 @@ export default function AdminPropertiesScreen() {
     setCategory(property.category);
     setPrice(property.price.toString());
     setLocation(property.location);
+    setSelectedImages(property.image_urls || []);
     setModalVisible(true);
   };
 
   const handleDelete = (id: string) => {
     Alert.alert('Delete Property', 'Are you sure you want to delete this property? This action cannot be undone.', [
       { text: 'Cancel', style: 'cancel' },
-      { 
-        text: 'Delete', 
-        style: 'destructive', 
+      {
+        text: 'Delete',
+        style: 'destructive',
         onPress: async () => {
           try {
             const { error } = await supabase.from('properties').delete().eq('id', id);
             if (error) throw error;
             Alert.alert('Success', 'Property deleted.');
-            setProperties(prev => prev.filter(p => p.id !== id));
+            setProperties((prev) => prev.filter((p) => p.id !== id));
           } catch (err) {
             console.error('Delete property error:', err);
             Alert.alert('Error', 'Failed to delete property.');
           }
-        }
-      }
+        },
+      },
     ]);
+  };
+
+  const handlePickImages = async () => {
+    try {
+      const uris = await pickImages(true);
+      if (uris.length > 0) {
+        setSelectedImages((prev) => [...prev, ...uris].slice(0, 5));
+      }
+    } catch (err: any) {
+      Alert.alert('Permission Required', err.message || 'Could not access photo library.');
+    }
+  };
+
+  const handleRemoveImage = (index: number) => {
+    setSelectedImages((prev) => prev.filter((_, i) => i !== index));
   };
 
   const fetchProperties = async () => {
@@ -106,7 +128,7 @@ export default function AdminPropertiesScreen() {
 
   const handleSubmit = async () => {
     if (!title.trim() || !description.trim() || !price || !location.trim()) {
-      Alert.alert('Validation Error', 'Please fill in all fields.');
+      Alert.alert('Validation Error', 'Please fill in all required fields.');
       return;
     }
 
@@ -116,11 +138,30 @@ export default function AdminPropertiesScreen() {
       return;
     }
 
+    if (!user?.id) {
+      Alert.alert('Error', 'Could not determine your account. Please sign in again.');
+      return;
+    }
+
     try {
       setSubmitting(true);
-      
+
+      // Upload any new local images (URIs starting with file:// or content://)
+      const uploadedUrls: string[] = [];
+      for (const uri of selectedImages) {
+        if (uri.startsWith('http://') || uri.startsWith('https://')) {
+          uploadedUrls.push(uri);
+        } else {
+          const filename = `${Date.now()}_${Math.random().toString(36).slice(2)}.jpg`;
+          const path = `${user.id}/${filename}`;
+          const publicUrl = await uploadImage('property-images', path, uri);
+          uploadedUrls.push(publicUrl);
+        }
+      }
+
       if (editingId) {
-        const { error } = await supabase.from('properties')
+        const { error } = await supabase
+          .from('properties')
           .update({
             title: title.trim(),
             description: description.trim(),
@@ -128,11 +169,12 @@ export default function AdminPropertiesScreen() {
             category,
             price: numPrice,
             location: location.trim(),
+            image_urls: uploadedUrls,
           })
           .eq('id', editingId);
 
         if (error) throw error;
-        Alert.alert('Success 🎉', 'Property updated successfully.');
+        Alert.alert('Success', 'Property updated successfully.');
       } else {
         const { error } = await supabase.from('properties').insert({
           title: title.trim(),
@@ -142,10 +184,11 @@ export default function AdminPropertiesScreen() {
           price: numPrice,
           location: location.trim(),
           status: 'available',
+          image_urls: uploadedUrls,
         });
 
         if (error) throw error;
-        Alert.alert('Success 🎉', 'New property listed successfully.');
+        Alert.alert('Success', 'New property listed successfully.');
       }
 
       setModalVisible(false);
@@ -159,13 +202,13 @@ export default function AdminPropertiesScreen() {
     }
   };
 
-  const formatPrice = (price: number, type: string) => {
+  const formatPrice = (p: number, t: string) => {
     const formatted = new Intl.NumberFormat('en-KE', {
       style: 'currency',
       currency: 'KES',
       maximumFractionDigits: 0,
-    }).format(price);
-    return type === 'rental' ? `${formatted}/month` : formatted;
+    }).format(p);
+    return t === 'rental' ? `${formatted}/month` : formatted;
   };
 
   return (
@@ -181,12 +224,18 @@ export default function AdminPropertiesScreen() {
             keyExtractor={(item) => item.id}
             renderItem={({ item }) => (
               <View style={styles.card}>
+                {item.image_urls?.[0] ? (
+                  <Image source={{ uri: item.image_urls[0] }} style={styles.cardImage} />
+                ) : null}
+
                 <View style={styles.cardHeader}>
                   <Text style={styles.cardTitle}>{item.title}</Text>
-                  <View style={[
-                    styles.statusBadge,
-                    item.status === 'available' ? styles.statusAvail : styles.statusRented
-                  ]}>
+                  <View
+                    style={[
+                      styles.statusBadge,
+                      item.status === 'available' ? styles.statusAvail : styles.statusRented,
+                    ]}
+                  >
                     <Text style={styles.statusText}>{item.status.toUpperCase()}</Text>
                   </View>
                 </View>
@@ -204,14 +253,19 @@ export default function AdminPropertiesScreen() {
                 </View>
 
                 <Text style={styles.price}>{formatPrice(item.price, item.type)}</Text>
-                <Text style={styles.desc} numberOfLines={2}>{item.description}</Text>
+                <Text style={styles.desc} numberOfLines={2}>
+                  {item.description}
+                </Text>
 
                 <View style={styles.actionRow}>
                   <TouchableOpacity style={styles.actionBtn} onPress={() => handleEdit(item)}>
                     <Edit2 size={14} color="#38BDF8" style={styles.actionIcon} />
                     <Text style={styles.actionBtnText}>Edit</Text>
                   </TouchableOpacity>
-                  <TouchableOpacity style={[styles.actionBtn, styles.deleteBtn]} onPress={() => handleDelete(item.id)}>
+                  <TouchableOpacity
+                    style={[styles.actionBtn, styles.deleteBtn]}
+                    onPress={() => handleDelete(item.id)}
+                  >
                     <Trash2 size={14} color="#EF4444" style={styles.actionIcon} />
                     <Text style={styles.deleteBtnText}>Delete</Text>
                   </TouchableOpacity>
@@ -229,8 +283,8 @@ export default function AdminPropertiesScreen() {
             }
           />
 
-          <TouchableOpacity 
-            style={styles.fab} 
+          <TouchableOpacity
+            style={styles.fab}
             onPress={() => {
               resetForm();
               setModalVisible(true);
@@ -241,7 +295,6 @@ export default function AdminPropertiesScreen() {
         </>
       )}
 
-      {/* Add Property Modal */}
       <Modal
         animationType="slide"
         transparent={true}
@@ -251,7 +304,9 @@ export default function AdminPropertiesScreen() {
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
             <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>{editingId ? 'Edit Property Listing' : 'Add New Property Listing'}</Text>
+              <Text style={styles.modalTitle}>
+                {editingId ? 'Edit Property Listing' : 'Add New Property Listing'}
+              </Text>
               <TouchableOpacity onPress={() => setModalVisible(false)}>
                 <X size={24} color="#94A3B8" />
               </TouchableOpacity>
@@ -283,25 +338,16 @@ export default function AdminPropertiesScreen() {
                 />
               </View>
 
-              {/* Type toggle */}
               <View style={styles.inputGroup}>
                 <Text style={styles.label}>Listing Type</Text>
                 <View style={styles.toggleContainer}>
                   {(['rental', 'sale'] as const).map((t) => (
                     <TouchableOpacity
                       key={t}
-                      style={[
-                        styles.toggleBtn,
-                        type === t && styles.toggleBtnActive,
-                      ]}
+                      style={[styles.toggleBtn, type === t && styles.toggleBtnActive]}
                       onPress={() => setType(t)}
                     >
-                      <Text
-                        style={[
-                          styles.toggleBtnText,
-                          type === t && styles.toggleBtnTextActive,
-                        ]}
-                      >
+                      <Text style={[styles.toggleBtnText, type === t && styles.toggleBtnTextActive]}>
                         {t.toUpperCase()}
                       </Text>
                     </TouchableOpacity>
@@ -309,25 +355,16 @@ export default function AdminPropertiesScreen() {
                 </View>
               </View>
 
-              {/* Category toggle */}
               <View style={styles.inputGroup}>
                 <Text style={styles.label}>Category</Text>
                 <View style={styles.toggleContainer}>
                   {(['residential', 'commercial', 'land'] as const).map((c) => (
                     <TouchableOpacity
                       key={c}
-                      style={[
-                        styles.toggleBtn,
-                        category === c && styles.toggleBtnActive,
-                      ]}
+                      style={[styles.toggleBtn, category === c && styles.toggleBtnActive]}
                       onPress={() => setCategory(c)}
                     >
-                      <Text
-                        style={[
-                          styles.toggleBtnText,
-                          category === c && styles.toggleBtnTextActive,
-                        ]}
-                      >
+                      <Text style={[styles.toggleBtnText, category === c && styles.toggleBtnTextActive]}>
                         {c.toUpperCase()}
                       </Text>
                     </TouchableOpacity>
@@ -358,8 +395,42 @@ export default function AdminPropertiesScreen() {
                 />
               </View>
 
+              {/* Image Picker */}
+              <View style={styles.inputGroup}>
+                <Text style={styles.label}>Property Photos (up to 5)</Text>
+
+                {selectedImages.length > 0 && (
+                  <ScrollView
+                    horizontal
+                    showsHorizontalScrollIndicator={false}
+                    style={styles.imagePreviewRow}
+                  >
+                    {selectedImages.map((uri, index) => (
+                      <View key={index} style={styles.imagePreviewWrapper}>
+                        <Image source={{ uri }} style={styles.imagePreview} />
+                        <TouchableOpacity
+                          style={styles.imageRemoveBtn}
+                          onPress={() => handleRemoveImage(index)}
+                        >
+                          <X size={12} color="#F8FAFC" />
+                        </TouchableOpacity>
+                      </View>
+                    ))}
+                  </ScrollView>
+                )}
+
+                {selectedImages.length < 5 && (
+                  <TouchableOpacity style={styles.imagePickerBtn} onPress={handlePickImages}>
+                    <Camera size={20} color="#38BDF8" />
+                    <Text style={styles.imagePickerText}>
+                      {selectedImages.length === 0 ? 'Add Photos' : 'Add More Photos'}
+                    </Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+
               <TouchableOpacity
-                style={styles.submitBtn}
+                style={[styles.submitBtn, submitting && styles.submitBtnDisabled]}
                 onPress={handleSubmit}
                 disabled={submitting}
               >
@@ -393,6 +464,13 @@ const styles = StyleSheet.create({
     marginBottom: 16,
     borderColor: '#334155',
     borderWidth: 1,
+  },
+  cardImage: {
+    width: '100%',
+    height: 140,
+    borderRadius: 8,
+    marginBottom: 12,
+    backgroundColor: '#0F172A',
   },
   cardHeader: {
     flexDirection: 'row',
@@ -529,7 +607,7 @@ const styles = StyleSheet.create({
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
     padding: 24,
-    maxHeight: '90%',
+    maxHeight: '92%',
   },
   modalHeader: {
     flexDirection: 'row',
@@ -596,12 +674,56 @@ const styles = StyleSheet.create({
     color: '#0F172A',
     fontWeight: 'bold',
   },
+  imagePreviewRow: {
+    marginBottom: 12,
+  },
+  imagePreviewWrapper: {
+    marginRight: 10,
+    position: 'relative',
+  },
+  imagePreview: {
+    width: 90,
+    height: 90,
+    borderRadius: 8,
+    backgroundColor: '#0F172A',
+  },
+  imageRemoveBtn: {
+    position: 'absolute',
+    top: 4,
+    right: 4,
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: 'rgba(15, 23, 42, 0.8)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  imagePickerBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: '#38BDF8',
+    borderStyle: 'dashed',
+    borderRadius: 8,
+    paddingVertical: 14,
+    backgroundColor: 'rgba(56, 189, 248, 0.05)',
+    gap: 8,
+  },
+  imagePickerText: {
+    color: '#38BDF8',
+    fontWeight: '600',
+    fontSize: 14,
+  },
   submitBtn: {
     backgroundColor: '#38BDF8',
     borderRadius: 8,
     paddingVertical: 14,
     alignItems: 'center',
     marginTop: 10,
+  },
+  submitBtnDisabled: {
+    opacity: 0.6,
   },
   submitBtnText: {
     color: '#0F172A',

@@ -1,71 +1,63 @@
-import { Tabs } from 'expo-router';
-import { ShieldCheck, Home, Users, User, Package } from 'lucide-react-native';
+import React from 'react';
+import { Platform, useWindowDimensions } from 'react-native';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
+import { Drawer } from 'expo-router/drawer';
+import { DrawerToggleButton } from '@react-navigation/drawer';
+import AdminDrawerContent from '../../components/admin/AdminDrawerContent';
+import { adminTheme } from '../../constants/adminTheme';
+import { ADMIN_NAV_ITEMS, getNavItemByName } from '../../lib/adminNav';
 
 export default function AdminLayout() {
+  const { width } = useWindowDimensions();
+  const isWideWeb = Platform.OS === 'web' && width >= 1024;
+
+  const hiddenDrawerItem = { display: 'none' as const, height: 0, width: 0 };
+
   return (
-    <Tabs
-      screenOptions={{
-        tabBarActiveTintColor: '#38BDF8',
-        tabBarInactiveTintColor: '#94A3B8',
-        tabBarStyle: {
-          backgroundColor: '#1E293B',
-          borderTopColor: '#334155',
-          paddingBottom: 8,
-          paddingTop: 8,
-          height: 65,
-        },
-        headerStyle: {
-          backgroundColor: '#1E293B',
-          borderBottomWidth: 1,
-          borderBottomColor: '#334155',
-        },
-        headerTintColor: '#F8FAFC',
-        headerTitleStyle: {
-          fontWeight: 'bold',
-          fontSize: 18,
-        },
-      }}
-    >
-      <Tabs.Screen
-        name="dashboard"
-        options={{
-          title: 'Operations Hub',
-          tabBarLabel: 'Dashboard',
-          tabBarIcon: ({ color, size }) => <ShieldCheck color={color} size={size} />,
+    <GestureHandlerRootView style={{ flex: 1 }}>
+      <Drawer
+        drawerContent={(props) => <AdminDrawerContent {...props} />}
+        screenOptions={{
+          drawerType: isWideWeb ? 'permanent' : 'front',
+          drawerStyle: {
+            width: adminTheme.sidebar.width,
+            backgroundColor: adminTheme.colors.surface,
+            borderRightColor: adminTheme.colors.border,
+            borderRightWidth: 1,
+          },
+          overlayColor: 'rgba(15, 23, 42, 0.65)',
+          swipeEnabled: !isWideWeb,
+          headerShown: true,
+          headerStyle: {
+            backgroundColor: adminTheme.colors.surface,
+            borderBottomWidth: 1,
+            borderBottomColor: adminTheme.colors.border,
+          },
+          headerTintColor: adminTheme.colors.text,
+          headerTitleStyle: {
+            fontWeight: '700',
+            fontSize: 18,
+          },
+          headerLeft: isWideWeb
+            ? () => null
+            : () => <DrawerToggleButton tintColor={adminTheme.colors.text} />,
+          drawerItemStyle: hiddenDrawerItem,
         }}
-      />
-      <Tabs.Screen
-        name="properties"
-        options={{
-          title: 'Manage Properties',
-          tabBarLabel: 'Properties',
-          tabBarIcon: ({ color, size }) => <Home color={color} size={size} />,
-        }}
-      />
-      <Tabs.Screen
-        name="users"
-        options={{
-          title: 'Manage Users & Leases',
-          tabBarLabel: 'Users',
-          tabBarIcon: ({ color, size }) => <Users color={color} size={size} />,
-        }}
-      />
-      <Tabs.Screen
-        name="inventory"
-        options={{
-          title: 'Manage Inventory',
-          tabBarLabel: 'Inventory',
-          tabBarIcon: ({ color, size }) => <Package color={color} size={size} />,
-        }}
-      />
-      <Tabs.Screen
-        name="profile"
-        options={{
-          title: 'My Profile',
-          tabBarLabel: 'Profile',
-          tabBarIcon: ({ color, size }) => <User color={color} size={size} />,
-        }}
-      />
-    </Tabs>
+      >
+        {ADMIN_NAV_ITEMS.map((item) => {
+          const navItem = getNavItemByName(item.name)!;
+          return (
+            <Drawer.Screen
+              key={item.name}
+              name={item.name}
+              options={{
+                title: navItem.title,
+                drawerItemStyle: hiddenDrawerItem,
+              }}
+            />
+          );
+        })}
+      </Drawer>
+    </GestureHandlerRootView>
   );
 }

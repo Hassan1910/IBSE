@@ -2,10 +2,14 @@ import React from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Alert } from 'react-native';
 import { useUser, useAuth } from '@clerk/clerk-expo';
 import { LogOut, User, Mail, Phone } from 'lucide-react-native';
+import { useRole } from '../../hooks/useRole';
+import { adminTheme } from '../../constants/adminTheme';
 
 export default function AdminProfile() {
   const { user } = useUser();
   const { signOut } = useAuth();
+  const { role } = useRole();
+  const accountLabel = role === 'finance' ? 'IBSA Finance Account' : 'IBSA Administrator Account';
 
   const handleSignOut = () => {
     Alert.alert(
@@ -22,23 +26,23 @@ export default function AdminProfile() {
     <View style={styles.container}>
       <View style={styles.profileCard}>
         <View style={styles.avatar}>
-          <User size={40} color="#0F172A" />
+          <User size={40} color={adminTheme.colors.onAccent} />
         </View>
         <Text style={styles.name}>{user?.fullName || 'Admin User'}</Text>
-        <Text style={styles.roleText}>IBSA Administrator Account</Text>
+        <Text style={styles.roleText}>{accountLabel}</Text>
       </View>
 
       <View style={styles.infoList}>
         <View style={styles.infoItem}>
-          <Mail size={20} color="#38BDF8" style={styles.icon} />
+          <Mail size={20} color={adminTheme.colors.accent} style={styles.icon} />
           <View>
             <Text style={styles.infoLabel}>Email Address</Text>
             <Text style={styles.infoVal}>{user?.primaryEmailAddress?.emailAddress}</Text>
           </View>
         </View>
 
-        <View style={styles.infoItem}>
-          <Phone size={20} color="#38BDF8" style={styles.icon} />
+        <View style={[styles.infoItem, styles.infoItemLast]}>
+          <Phone size={20} color={adminTheme.colors.accent} style={styles.icon} />
           <View>
             <Text style={styles.infoLabel}>Phone Number</Text>
             <Text style={styles.infoVal}>{user?.primaryPhoneNumber?.phoneNumber || 'Synced on profile'}</Text>
@@ -47,7 +51,7 @@ export default function AdminProfile() {
       </View>
 
       <TouchableOpacity style={styles.logoutBtn} onPress={handleSignOut}>
-        <LogOut size={20} color="#EF4444" style={styles.logoutIcon} />
+        <LogOut size={20} color={adminTheme.colors.danger} style={styles.logoutIcon} />
         <Text style={styles.logoutText}>Sign Out</Text>
       </TouchableOpacity>
     </View>
@@ -57,83 +61,86 @@ export default function AdminProfile() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#0F172A',
-    padding: 24,
+    backgroundColor: adminTheme.colors.bg,
+    padding: adminTheme.spacing.xl,
     justifyContent: 'center',
   },
   profileCard: {
     alignItems: 'center',
-    backgroundColor: '#1E293B',
-    borderRadius: 16,
-    padding: 24,
-    borderColor: '#334155',
+    backgroundColor: adminTheme.colors.surface,
+    borderRadius: adminTheme.radius.lg,
+    padding: adminTheme.spacing.xl,
+    borderColor: adminTheme.colors.border,
     borderWidth: 1,
-    marginBottom: 24,
+    marginBottom: adminTheme.spacing.xl,
   },
   avatar: {
     width: 80,
     height: 80,
     borderRadius: 40,
-    backgroundColor: '#38BDF8',
+    backgroundColor: adminTheme.colors.accent,
     alignItems: 'center',
     justifyContent: 'center',
-    marginBottom: 16,
+    marginBottom: adminTheme.spacing.lg,
   },
   name: {
     fontSize: 20,
-    fontWeight: 'bold',
-    color: '#F8FAFC',
+    fontWeight: '700',
+    color: adminTheme.colors.text,
   },
   roleText: {
     fontSize: 14,
-    color: '#38BDF8',
+    color: adminTheme.colors.accent,
     fontWeight: '500',
     marginTop: 4,
   },
   infoList: {
-    backgroundColor: '#1E293B',
-    borderRadius: 12,
-    padding: 16,
-    borderColor: '#334155',
+    backgroundColor: adminTheme.colors.surface,
+    borderRadius: adminTheme.radius.md,
+    padding: adminTheme.spacing.lg,
+    borderColor: adminTheme.colors.border,
     borderWidth: 1,
-    marginBottom: 24,
+    marginBottom: adminTheme.spacing.xl,
   },
   infoItem: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: 12,
+    paddingVertical: adminTheme.spacing.md,
     borderBottomWidth: 1,
-    borderBottomColor: '#334155',
+    borderBottomColor: adminTheme.colors.border,
+  },
+  infoItemLast: {
+    borderBottomWidth: 0,
   },
   icon: {
-    marginRight: 16,
+    marginRight: adminTheme.spacing.lg,
   },
   infoLabel: {
     fontSize: 12,
-    color: '#94A3B8',
+    color: adminTheme.colors.textMuted,
   },
   infoVal: {
     fontSize: 15,
-    color: '#F8FAFC',
+    color: adminTheme.colors.text,
     fontWeight: '500',
     marginTop: 2,
   },
   logoutBtn: {
     flexDirection: 'row',
-    backgroundColor: 'rgba(239, 68, 68, 0.1)',
-    borderColor: '#EF4444',
+    backgroundColor: adminTheme.colors.dangerMuted,
+    borderColor: adminTheme.colors.danger,
     borderWidth: 1,
-    borderRadius: 8,
+    borderRadius: adminTheme.radius.sm,
     paddingVertical: 14,
     alignItems: 'center',
     justifyContent: 'center',
   },
   logoutIcon: {
-    marginRight: 8,
+    marginRight: adminTheme.spacing.sm,
   },
   logoutText: {
-    color: '#EF4444',
-    fontWeight: 'bold',
+    color: adminTheme.colors.danger,
+    fontWeight: '700',
     fontSize: 16,
   },
 });

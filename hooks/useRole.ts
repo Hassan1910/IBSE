@@ -2,7 +2,7 @@ import { useUser, useAuth } from '@clerk/clerk-expo';
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { supabase, setSupabaseToken } from '../lib/supabase';
 
-export type UserRole = 'admin' | 'finance' | 'booking' | 'tenant' | 'client';
+export type UserRole = 'admin' | 'finance' | 'booking' | 'tenant' | 'client' | 'landlord';
 
 export function useRole() {
   const { user, isLoaded: isUserLoaded } = useUser();

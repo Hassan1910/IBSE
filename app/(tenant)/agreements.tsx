@@ -1,0 +1,187 @@
+import React, { useEffect, useState } from 'react';
+import { ActivityIndicator, Alert, Linking, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { useUser } from '@clerk/clerk-expo';
+import { supabase } from '../../lib/supabase';
+import { Calendar, FileText, Home, Link as LinkIcon } from 'lucide-react-native';
+
+interface LeaseAgreement {
+  id: string;
+  start_date: string;
+  end_date: string;
+  rent_amount: number;
+  terms: string | null;
+  contract_url: string | null;
+  properties: {
+    title: string;
+    location: string;
+  };
+  units: {
+    unit_number: string;
+  } | null;
+}
+
+export default function TenantAgreementsScreen() {
+  const { user } = useUser();
+  const [lease, setLease] = useState<LeaseAgreement | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const fetchAgreement = async () => {
+      if (!user?.id) return;
+      try {
+        setLoading(true);
+        const { data, error } = await supabase
+          .from('leases')
+          .select(`
+            id,
+            start_date,
+            end_date,
+            rent_amount,
+            terms,
+            contract_url,
+            properties ( title, location ),
+            units ( unit_number )
+          `)
+          .eq('tenant_id', user.id)
+          .eq('status', 'active')
+          .maybeSingle();
+
+        if (error) throw error;
+        setLease((data as any) || null);
+      } catch (err) {
+        console.error('Fetch agreement error:', err);
+        Alert.alert('Error', 'Failed to load your active agreement.');
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchAgreement();
+  }, [user?.id]);
+
+  const openContract = async () => {
+    if (!lease?.contract_url) return;
+    const canOpen = await Linking.canOpenURL(lease.contract_url);
+    if (!canOpen) {
+      Alert.alert('Invalid URL', 'Could not open this contract link.');
+      return;
+    }
+    Linking.openURL(lease.contract_url);
+  };
+
+  const formatPrice = (price: number) =>
+    new Intl.NumberFormat('en-KE', { style: 'currency', currency: 'KES', maximumFractionDigits: 0 }).format(price);
+  const formatDate = (dateStr: string) =>
+    new Date(dateStr).toLocaleDateString('en-KE', { year: 'numeric', month: 'short', day: 'numeric' });
+
+  const daysLeft = lease ? Math.max(Math.ceil((new Date(lease.end_date).getTime() - Date.now()) / (1000 * 60 * 60 * 24)), 0) : null;
+
+  if (loading) {
+    return (
+      <View style={styles.centered}>
+        <ActivityIndicator size="large" color="#38BDF8" />
+      </View>
+    );
+  }
+
+  if (!lease) {
+    return (
+      <View style={styles.centered}>
+        <Text style={styles.emptyText}>No active lease agreement found for your account.</Text>
+      </View>
+    );
+  }
+
+  return (
+    <ScrollView style={styles.container} contentContainerStyle={styles.content}>
+      <View style={styles.card}>
+        <View style={styles.headerRow}>
+          <Home size={20} color="#38BDF8" />
+          <View style={styles.headerText}>
+            <Text style={styles.title}>{lease.properties?.title}</Text>
+            <Text style={styles.sub}>{lease.properties?.location}</Text>
+            {lease.units?.unit_number ? <Text style={styles.sub}>Unit {lease.units.unit_number}</Text> : null}
+          </View>
+        </View>
+
+        <View style={styles.row}>
+          <Text style={styles.label}>Rent Amount</Text>
+          <Text style={styles.value}>{formatPrice(lease.rent_amount)}</Text>
+        </View>
+        <View style={styles.row}>
+          <Text style={styles.label}>Start Date</Text>
+          <Text style={styles.value}>{formatDate(lease.start_date)}</Text>
+        </View>
+        <View style={styles.row}>
+          <Text style={styles.label}>End Date</Text>
+          <Text style={styles.value}>{formatDate(lease.end_date)}</Text>
+        </View>
+      </View>
+
+      {daysLeft !== null && daysLeft <= 30 ? (
+        <View style={styles.warningCard}>
+          <Calendar size={16} color="#EF4444" />
+          <Text style={styles.warningText}>Your lease expires in {daysLeft} day(s). Contact support for renewal guidance.</Text>
+        </View>
+      ) : null}
+
+      <View style={styles.card}>
+        <View style={styles.sectionHeader}>
+          <FileText size={16} color="#38BDF8" />
+          <Text style={styles.sectionTitle}>Lease Terms</Text>
+        </View>
+        <Text style={styles.termsText}>{lease.terms || 'No written terms were provided in the system.'}</Text>
+      </View>
+
+      <TouchableOpacity style={styles.linkBtn} onPress={openContract} disabled={!lease.contract_url}>
+        <LinkIcon size={16} color="#0F172A" style={{ marginRight: 8 }} />
+        <Text style={styles.linkBtnText}>{lease.contract_url ? 'Open Lease Document' : 'No Contract URL Available'}</Text>
+      </TouchableOpacity>
+    </ScrollView>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: { flex: 1, backgroundColor: '#0F172A' },
+  content: { padding: 20, paddingBottom: 30 },
+  centered: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#0F172A', padding: 20 },
+  emptyText: { color: '#94A3B8', textAlign: 'center', fontSize: 14 },
+  card: {
+    backgroundColor: '#1E293B',
+    borderColor: '#334155',
+    borderWidth: 1,
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 14,
+  },
+  headerRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 10 },
+  headerText: { marginLeft: 10, flex: 1 },
+  title: { color: '#F8FAFC', fontSize: 16, fontWeight: 'bold' },
+  sub: { color: '#94A3B8', fontSize: 13, marginTop: 2 },
+  row: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 8 },
+  label: { color: '#94A3B8', fontSize: 13 },
+  value: { color: '#F8FAFC', fontWeight: '600' },
+  warningCard: {
+    backgroundColor: 'rgba(239, 68, 68, 0.12)',
+    borderColor: 'rgba(239, 68, 68, 0.5)',
+    borderWidth: 1,
+    borderRadius: 10,
+    padding: 12,
+    marginBottom: 14,
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  warningText: { color: '#FECACA', marginLeft: 8, flex: 1, fontSize: 13 },
+  sectionHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 8 },
+  sectionTitle: { color: '#F8FAFC', marginLeft: 8, fontWeight: 'bold', fontSize: 14 },
+  termsText: { color: '#CBD5E1', lineHeight: 21, fontSize: 14 },
+  linkBtn: {
+    backgroundColor: '#38BDF8',
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexDirection: 'row',
+    paddingVertical: 14,
+  },
+  linkBtnText: { color: '#0F172A', fontWeight: 'bold', fontSize: 14 },
+});

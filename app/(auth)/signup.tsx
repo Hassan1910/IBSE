@@ -14,13 +14,15 @@ import {
 import { useSignUp, useAuth } from '@clerk/clerk-expo';
 import { useRouter } from 'expo-router';
 import { supabase, setSupabaseToken } from '../../lib/supabase';
+import { logAudit } from '../../lib/audit';
+import { resolveInvite, markInviteAccepted } from '../../lib/invites';
 
+// Staff roles (landlord, booking, finance, admin) are invite-only: the
+// administrator pre-registers those emails and the invited role overrides
+// whatever is selected here.
 const ROLES = [
   { label: 'Client (Property Browser)', value: 'client' },
   { label: 'Tenant (Renter)', value: 'tenant' },
-  { label: 'Booking Officer (Staff)', value: 'booking' },
-  { label: 'Finance Officer (Staff)', value: 'finance' },
-  { label: 'Administrator', value: 'admin' },
 ];
 
 export default function SignUpScreen() {
@@ -32,10 +34,65 @@ export default function SignUpScreen() {
   const [emailAddress, setEmailAddress] = React.useState('');
   const [password, setPassword] = React.useState('');
   const [phone, setPhone] = React.useState('');
-  const [role, setRole] = React.useState<'admin' | 'finance' | 'booking' | 'tenant' | 'client'>('client');
+  const [role, setRole] = React.useState<'tenant' | 'client'>('client');
   const [pendingVerification, setPendingVerification] = React.useState(false);
   const [code, setCode] = React.useState('');
   const [loading, setLoading] = React.useState(false);
+
+  const completeSignUpFlow = async (createdUserId: string | null | undefined, createdSessionId: string | null | undefined) => {
+    if (!createdSessionId || !setActive) {
+      throw new Error('Sign up completed but no session was created.');
+    }
+
+    // Set session active in Clerk
+    await setActive({ session: createdSessionId });
+
+    // Get authenticated Supabase JWT
+    let sessionToken;
+    try {
+      sessionToken = await getToken({ template: 'supabase' });
+    } catch (tokenError: any) {
+      console.warn('[SignUp] Failed to fetch Supabase JWT template. Trying fallback:', tokenError.message);
+      sessionToken = await getToken();
+    }
+
+    if (!sessionToken) return;
+
+    setSupabaseToken(sessionToken);
+
+    // If an admin pre-registered this email, honour the invited role.
+    const invite = await resolveInvite(emailAddress);
+    const finalRole = invite?.role || role;
+
+    // Insert new profile record in Supabase
+    const { error: dbError } = await supabase.from('profiles').insert({
+      id: createdUserId,
+      full_name: fullName,
+      email: emailAddress,
+      phone,
+      role: finalRole,
+    });
+
+    if (dbError) {
+      console.error('[SignUp] Supabase profile insertion failed:', dbError);
+      Alert.alert(
+        'Sync Warning',
+        'Your account is created, but we failed to build your profile database entry. Please contact your administrator.'
+      );
+      return;
+    }
+
+    if (invite) await markInviteAccepted(invite.inviteId);
+    if (createdUserId) {
+      await logAudit({
+        actorId: createdUserId,
+        actorEmail: emailAddress,
+        actorRole: finalRole,
+        action: 'login',
+        description: 'Account created and signed in',
+      });
+    }
+  };
 
   // Initial Signup Submission
   const onSignUpPress = async () => {
@@ -54,6 +111,12 @@ export default function SignUpScreen() {
         firstName: fullName.split(' ')[0] || '',
         lastName: fullName.split(' ').slice(1).join(' ') || '',
       });
+
+      // Only prompt OTP when Clerk explicitly requires it.
+      if (signUp.status === 'complete') {
+        await completeSignUpFlow(signUp.createdUserId, signUp.createdSessionId);
+        return;
+      }
 
       await signUp.prepareEmailAddressVerification({ strategy: 'email_code' });
       setPendingVerification(true);
@@ -83,40 +146,7 @@ export default function SignUpScreen() {
         throw new Error('Verification not complete. Please check the code.');
       }
 
-      const createdUserId = completeSignUp.createdUserId;
-
-      // Set session active in Clerk
-      await setActive({ session: completeSignUp.createdSessionId });
-
-      // Get authenticated Supabase JWT
-      let sessionToken;
-      try {
-        sessionToken = await getToken({ template: 'supabase' });
-      } catch (tokenError: any) {
-        console.warn('[SignUp] Failed to fetch Supabase JWT template. Trying fallback:', tokenError.message);
-        sessionToken = await getToken();
-      }
-
-      if (sessionToken) {
-        setSupabaseToken(sessionToken);
-
-        // Insert new profile record in Supabase
-        const { error: dbError } = await supabase.from('profiles').insert({
-          id: createdUserId,
-          full_name: fullName,
-          email: emailAddress,
-          phone,
-          role,
-        });
-
-        if (dbError) {
-          console.error('[SignUp] Supabase profile insertion failed:', dbError);
-          Alert.alert(
-            'Sync Warning',
-            'Your account is created, but we failed to build your profile database entry. Please contact your administrator.'
-          );
-        }
-      }
+      await completeSignUpFlow(completeSignUp.createdUserId, completeSignUp.createdSessionId);
     } catch (err: any) {
       Alert.alert('Verification Failed', err.errors?.[0]?.message || err.message || 'An error occurred.');
     } finally {
@@ -212,6 +242,9 @@ export default function SignUpScreen() {
                   </TouchableOpacity>
                 ))}
               </View>
+              <Text style={styles.roleHint}>
+                Staff and landlord accounts are created by invitation from the administrator.
+              </Text>
             </View>
 
             <TouchableOpacity style={styles.submitButton} onPress={onSignUpPress} disabled={loading}>
@@ -359,6 +392,12 @@ const styles = StyleSheet.create({
   roleTextActive: {
     color: '#38BDF8',
     fontWeight: 'bold',
+  },
+  roleHint: {
+    color: '#64748B',
+    fontSize: 12,
+    marginTop: 4,
+    lineHeight: 17,
   },
   submitButton: {
     backgroundColor: '#38BDF8',

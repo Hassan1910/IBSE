@@ -1,19 +1,10 @@
-import React, { useState, useEffect } from 'react';
-import {
-  View,
-  Text,
-  TextInput,
-  StyleSheet,
-  TouchableOpacity,
-  ActivityIndicator,
-  Alert,
-  FlatList,
-  Modal,
-  ScrollView,
-} from 'react-native';
+import React, { useEffect, useMemo, useState } from 'react';
+import { ActivityIndicator, Alert, FlatList, Image, Modal, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { supabase } from '../../lib/supabase';
 import { useUser } from '@clerk/clerk-expo';
-import { Plus, Wrench, X, Clock, HelpCircle, CheckCircle } from 'lucide-react-native';
+import { pickImages, uploadImage } from '../../lib/storage';
+import { useAudit } from '../../hooks/useAudit';
+import { Camera, CheckCircle, Clock, HelpCircle, Plus, Wrench, X } from 'lucide-react-native';
 
 interface MaintenanceRequest {
   id: string;
@@ -21,6 +12,8 @@ interface MaintenanceRequest {
   description: string;
   priority: 'low' | 'medium' | 'high';
   status: 'pending' | 'in_progress' | 'resolved';
+  image_urls: string[] | null;
+  tenant_confirmed_at: string | null;
   created_at: string;
   properties: {
     title: string;
@@ -29,6 +22,7 @@ interface MaintenanceRequest {
 
 export default function TenantMaintenanceScreen() {
   const { user } = useUser();
+  const { log } = useAudit();
   const [requests, setRequests] = useState<MaintenanceRequest[]>([]);
   const [loading, setLoading] = useState(true);
   const [lease, setLease] = useState<any>(null);
@@ -38,7 +32,11 @@ export default function TenantMaintenanceScreen() {
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [priority, setPriority] = useState<'low' | 'medium' | 'high'>('medium');
+  const [selectedImages, setSelectedImages] = useState<string[]>([]);
+  const [detailItem, setDetailItem] = useState<MaintenanceRequest | null>(null);
+  const [detailVisible, setDetailVisible] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [confirming, setConfirming] = useState(false);
 
   // Fetch tenant's active lease and historical requests
   const fetchData = async () => {
@@ -59,15 +57,7 @@ export default function TenantMaintenanceScreen() {
       // Fetch tickets
       const { data: tickets, error } = await supabase
         .from('maintenance_requests')
-        .select(`
-          id,
-          title,
-          description,
-          priority,
-          status,
-          created_at,
-          properties ( title )
-        `)
+        .select('id, title, description, priority, status, image_urls, tenant_confirmed_at, created_at, properties ( title )')
         .eq('tenant_id', user.id)
         .order('created_at', { ascending: false });
 
@@ -85,6 +75,26 @@ export default function TenantMaintenanceScreen() {
     fetchData();
   }, [user]);
 
+  const handlePickImages = async () => {
+    try {
+      const uris = await pickImages(true);
+      if (uris.length) setSelectedImages(uris);
+    } catch (err: any) {
+      Alert.alert('Image Picker', err.message || 'Failed to pick images.');
+    }
+  };
+
+  const uploadMaintenanceImages = async (requestId: string) => {
+    if (!user?.id || !selectedImages.length) return [];
+    const urls: string[] = [];
+    for (let idx = 0; idx < selectedImages.length; idx += 1) {
+      const path = `${user.id}/${requestId}/image-${idx + 1}.jpg`;
+      const url = await uploadImage('maintenance-images', path, selectedImages[idx]);
+      urls.push(url);
+    }
+    return urls;
+  };
+
   const handleSubmit = async () => {
     if (!user) return;
     if (!lease) {
@@ -98,21 +108,45 @@ export default function TenantMaintenanceScreen() {
 
     try {
       setSubmitting(true);
-      const { error } = await supabase.from('maintenance_requests').insert({
+      const { data, error } = await supabase
+        .from('maintenance_requests')
+        .insert({
         property_id: lease.property_id,
         tenant_id: user.id,
         title: title.trim(),
         description: description.trim(),
         priority,
         status: 'pending',
-      });
+      })
+        .select('id')
+        .single();
 
       if (error) throw error;
+
+      const requestId = data?.id;
+      if (requestId && selectedImages.length) {
+        const imageUrls = await uploadMaintenanceImages(requestId);
+        if (imageUrls.length) {
+          const { error: imageUpdateError } = await supabase
+            .from('maintenance_requests')
+            .update({ image_urls: imageUrls })
+            .eq('id', requestId);
+          if (imageUpdateError) throw imageUpdateError;
+        }
+      }
+
+      await log({
+        action: 'create',
+        entityType: 'maintenance',
+        entityId: requestId,
+        description: 'Tenant submitted maintenance request.',
+      });
 
       Alert.alert('Success 🎉', 'Your maintenance ticket has been submitted. Technicians will visit shortly.');
       setModalVisible(false);
       setTitle('');
       setDescription('');
+      setSelectedImages([]);
       fetchData(); // reload lists
     } catch (err: any) {
       console.error('Submit ticket error:', err);
@@ -162,6 +196,43 @@ export default function TenantMaintenanceScreen() {
     return '#10B981';
   };
 
+  const confirmRepair = async (item: MaintenanceRequest) => {
+    if (!item || item.status !== 'resolved') return;
+    try {
+      setConfirming(true);
+      const confirmedAt = new Date().toISOString();
+      const { error } = await supabase
+        .from('maintenance_requests')
+        .update({ tenant_confirmed_at: confirmedAt })
+        .eq('id', item.id);
+      if (error) throw error;
+
+      await log({
+        action: 'update',
+        entityType: 'maintenance',
+        entityId: item.id,
+        description: 'Tenant confirmed maintenance repair completion.',
+      });
+
+      setDetailVisible(false);
+      fetchData();
+      Alert.alert('Confirmed', 'Repair has been marked as confirmed.');
+    } catch (err) {
+      console.error('Confirm repair error:', err);
+      Alert.alert('Error', 'Failed to confirm repair.');
+    } finally {
+      setConfirming(false);
+    }
+  };
+
+  const timelineStatus = useMemo(() => {
+    if (!detailItem) return '';
+    if (detailItem.tenant_confirmed_at) return 'Confirmed by tenant';
+    if (detailItem.status === 'resolved') return 'Resolved - waiting your confirmation';
+    if (detailItem.status === 'in_progress') return 'Technician is working on it';
+    return 'Ticket submitted - waiting assignment';
+  }, [detailItem]);
+
   return (
     <View style={styles.container}>
       {loading ? (
@@ -174,7 +245,14 @@ export default function TenantMaintenanceScreen() {
             data={requests}
             keyExtractor={(item) => item.id}
             renderItem={({ item }) => (
-              <View style={styles.card}>
+              <TouchableOpacity
+                style={styles.card}
+                onPress={() => {
+                  setDetailItem(item);
+                  setDetailVisible(true);
+                }}
+                activeOpacity={0.9}
+              >
                 <View style={styles.cardHeader}>
                   <Text style={styles.cardTitle}>{item.title}</Text>
                   {renderStatus(item.status)}
@@ -192,7 +270,7 @@ export default function TenantMaintenanceScreen() {
                     </Text>
                   </View>
                 </View>
-              </View>
+              </TouchableOpacity>
             )}
             contentContainerStyle={styles.listContainer}
             onRefresh={fetchData}
@@ -283,6 +361,21 @@ export default function TenantMaintenanceScreen() {
                 </View>
               </View>
 
+              <View style={styles.inputGroup}>
+                <Text style={styles.label}>Issue Photos (optional)</Text>
+                <TouchableOpacity style={styles.imagePickerBtn} onPress={handlePickImages}>
+                  <Camera size={16} color="#38BDF8" style={{ marginRight: 8 }} />
+                  <Text style={styles.imagePickerText}>Select Photos</Text>
+                </TouchableOpacity>
+                {selectedImages.length > 0 ? (
+                  <View style={styles.imagePreviewRow}>
+                    {selectedImages.map((uri) => (
+                      <Image key={uri} source={{ uri }} style={styles.previewImage} />
+                    ))}
+                  </View>
+                ) : null}
+              </View>
+
               <TouchableOpacity
                 style={styles.submitBtn}
                 onPress={handleSubmit}
@@ -295,6 +388,56 @@ export default function TenantMaintenanceScreen() {
                 )}
               </TouchableOpacity>
             </ScrollView>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal animationType="slide" transparent visible={detailVisible} onRequestClose={() => setDetailVisible(false)}>
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Ticket Details</Text>
+              <TouchableOpacity onPress={() => setDetailVisible(false)}>
+                <X size={24} color="#94A3B8" />
+              </TouchableOpacity>
+            </View>
+            {detailItem ? (
+              <ScrollView contentContainerStyle={styles.modalBody}>
+                <Text style={styles.detailTitle}>{detailItem.title}</Text>
+                <Text style={styles.detailMeta}>Property: {detailItem.properties?.title}</Text>
+                <Text style={styles.detailMeta}>Status: {detailItem.status.replace('_', ' ').toUpperCase()}</Text>
+                <Text style={styles.detailMeta}>Priority: {detailItem.priority.toUpperCase()}</Text>
+                <Text style={styles.detailMeta}>Reported: {formatDate(detailItem.created_at)}</Text>
+                <Text style={styles.detailTimeline}>{timelineStatus}</Text>
+                <Text style={styles.detailDescription}>{detailItem.description}</Text>
+
+                {detailItem.image_urls?.length ? (
+                  <View style={styles.imagePreviewRow}>
+                    {detailItem.image_urls.map((uri) => (
+                      <Image key={uri} source={{ uri }} style={styles.previewImage} />
+                    ))}
+                  </View>
+                ) : (
+                  <Text style={styles.emptyText}>No issue photos attached.</Text>
+                )}
+
+                {detailItem.status === 'resolved' ? (
+                  <TouchableOpacity
+                    style={[styles.submitBtn, detailItem.tenant_confirmed_at ? styles.confirmedBtn : null]}
+                    disabled={!!detailItem.tenant_confirmed_at || confirming}
+                    onPress={() => confirmRepair(detailItem)}
+                  >
+                    {confirming ? (
+                      <ActivityIndicator color="#0F172A" />
+                    ) : (
+                      <Text style={styles.submitBtnText}>
+                        {detailItem.tenant_confirmed_at ? 'Repair Already Confirmed' : 'Confirm Repair Completion'}
+                      </Text>
+                    )}
+                  </TouchableOpacity>
+                ) : null}
+              </ScrollView>
+            ) : null}
           </View>
         </View>
       </Modal>
@@ -518,4 +661,21 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     fontSize: 16,
   },
+  imagePickerBtn: {
+    borderColor: '#38BDF8',
+    borderWidth: 1,
+    borderRadius: 8,
+    paddingVertical: 10,
+    justifyContent: 'center',
+    alignItems: 'center',
+    flexDirection: 'row',
+  },
+  imagePickerText: { color: '#38BDF8', fontWeight: '600' },
+  imagePreviewRow: { flexDirection: 'row', flexWrap: 'wrap', marginTop: 10 },
+  previewImage: { width: 60, height: 60, borderRadius: 8, marginRight: 8, marginBottom: 8 },
+  detailTitle: { color: '#F8FAFC', fontSize: 16, fontWeight: 'bold', marginBottom: 8 },
+  detailMeta: { color: '#94A3B8', marginBottom: 4, fontSize: 13 },
+  detailTimeline: { color: '#38BDF8', marginTop: 4, marginBottom: 10, fontWeight: '600' },
+  detailDescription: { color: '#F8FAFC', fontSize: 14, lineHeight: 20, marginBottom: 12 },
+  confirmedBtn: { opacity: 0.6 },
 });

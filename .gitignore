@@ -47,3 +47,6 @@ yarn-error.*
 pnpm-lock.yaml
 test-supabase.mjs
 
+# Cursor settings
+.cursor/
+

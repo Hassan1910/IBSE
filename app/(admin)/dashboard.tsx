@@ -5,27 +5,70 @@ import {
   FlatList,
   StyleSheet,
   TouchableOpacity,
-  ActivityIndicator,
   Alert,
 } from 'react-native';
 import { supabase } from '../../lib/supabase';
+import { useUser } from '@clerk/clerk-expo';
+import { useRole } from '../../hooks/useRole';
+import { notifyUser } from '../../lib/notifications';
+import MaterialsUsedModal from '../../components/MaterialsUsedModal';
+import StatCard from '../../components/admin/StatCard';
+import SegmentedTabs from '../../components/admin/SegmentedTabs';
+import QueueCard, {
+  QueueCardDivider,
+  QueueCardInfoRow,
+  QueueCardActionButton,
+} from '../../components/admin/QueueCard';
+import DashboardSkeleton from '../../components/admin/DashboardSkeleton';
+import { adminTheme } from '../../constants/adminTheme';
 import {
   CreditCard,
   User,
-  Check,
   X,
   ShieldAlert,
   Calendar,
   Wrench,
   MessageSquare,
   Clock,
-  HelpCircle,
   CheckCircle,
   FileText,
+  Package,
+  Wallet,
+  FileText as LeaseIcon,
 } from 'lucide-react-native';
+
+function getGreeting(): string {
+  const hour = new Date().getHours();
+  if (hour < 12) return 'Good morning';
+  if (hour < 17) return 'Good afternoon';
+  return 'Good evening';
+}
+
+function getPriorityColors(p: string) {
+  switch (p) {
+    case 'high':
+      return { bg: 'rgba(239, 68, 68, 0.15)', border: adminTheme.colors.danger, text: adminTheme.colors.danger };
+    case 'medium':
+      return { bg: 'rgba(234, 179, 8, 0.15)', border: adminTheme.colors.warning, text: adminTheme.colors.warning };
+    default:
+      return { bg: 'rgba(16, 185, 129, 0.15)', border: adminTheme.colors.success, text: adminTheme.colors.success };
+  }
+}
+
+function getFeedbackBadgeColors(type: string) {
+  switch (type) {
+    case 'complaint':
+      return { bg: 'rgba(239, 68, 68, 0.15)', border: adminTheme.colors.danger, text: adminTheme.colors.danger };
+    case 'suggestion':
+      return { bg: adminTheme.colors.accentMuted, border: adminTheme.colors.accent, text: adminTheme.colors.accent };
+    default:
+      return { bg: 'rgba(234, 179, 8, 0.15)', border: adminTheme.colors.warning, text: adminTheme.colors.warning };
+  }
+}
 
 interface Payment {
   id: string;
+  payer_id: string;
   amount: number;
   payment_method: string;
   reference_code: string;
@@ -61,6 +104,7 @@ interface Booking {
 
 interface MaintenanceRequest {
   id: string;
+  tenant_id: string;
   title: string;
   description: string;
   priority: 'low' | 'medium' | 'high';
@@ -85,14 +129,26 @@ interface Feedback {
   };
 }
 
+type DashboardTab = 'payments' | 'bookings' | 'maintenance' | 'feedback';
+
 export default function AdminDashboard() {
-  const [activeTab, setActiveTab] = useState<'payments' | 'bookings' | 'maintenance' | 'feedback'>('payments');
+  const { user } = useUser();
+  const { role, loading: roleLoading } = useRole();
+  // Finance staff only handle payment verification; operational queues
+  // (bookings, maintenance, feedback) are hidden from them.
+  const isFinance = role === 'finance';
+  const availableTabs: DashboardTab[] = isFinance
+    ? ['payments']
+    : ['payments', 'bookings', 'maintenance', 'feedback'];
+
+  const [activeTab, setActiveTab] = useState<DashboardTab>('payments');
   const [payments, setPayments] = useState<Payment[]>([]);
   const [bookings, setBookings] = useState<Booking[]>([]);
   const [maintenanceRequests, setMaintenanceRequests] = useState<MaintenanceRequest[]>([]);
   const [feedback, setFeedback] = useState<Feedback[]>([]);
   const [loading, setLoading] = useState(true);
   const [stats, setStats] = useState({ totalRevenue: 0, activeLeases: 0, pendingBookings: 0, openMaintenance: 0 });
+  const [materialsRequest, setMaterialsRequest] = useState<MaintenanceRequest | null>(null);
 
   const fetchDashboardData = async () => {
     try {
@@ -103,6 +159,7 @@ export default function AdminDashboard() {
         .from('payments')
         .select(`
           id,
+          payer_id,
           amount,
           payment_method,
           reference_code,
@@ -119,57 +176,65 @@ export default function AdminDashboard() {
       if (payError) throw payError;
       setPayments((payData as any) || []);
 
-      // 2. Fetch pending bookings
-      const { data: bookData, error: bookError } = await supabase
-        .from('bookings')
-        .select(`
-          id,
-          booking_date,
-          type,
-          status,
-          notes,
-          properties ( title, location ),
-          profiles ( full_name, email, phone )
-        `)
-        .eq('status', 'pending')
-        .order('booking_date', { ascending: true });
+      let maintData: any[] | null = null;
 
-      if (bookError) throw bookError;
-      setBookings((bookData as any) || []);
+      // Operational queues (bookings, maintenance, feedback) are only relevant
+      // to admins. Finance staff skip these queries entirely.
+      if (!isFinance) {
+        // 2. Fetch pending bookings
+        const { data: bookData, error: bookError } = await supabase
+          .from('bookings')
+          .select(`
+            id,
+            booking_date,
+            type,
+            status,
+            notes,
+            properties ( title, location ),
+            profiles ( full_name, email, phone )
+          `)
+          .eq('status', 'pending')
+          .order('booking_date', { ascending: true });
 
-      // 3. Fetch active maintenance requests
-      const { data: maintData, error: maintError } = await supabase
-        .from('maintenance_requests')
-        .select(`
-          id,
-          title,
-          description,
-          priority,
-          status,
-          created_at,
-          properties ( title ),
-          profiles ( full_name )
-        `)
-        .neq('status', 'resolved')
-        .order('created_at', { ascending: false });
+        if (bookError) throw bookError;
+        setBookings((bookData as any) || []);
 
-      if (maintError) throw maintError;
-      setMaintenanceRequests((maintData as any) || []);
+        // 3. Fetch active maintenance requests
+        const { data: maintResult, error: maintError } = await supabase
+          .from('maintenance_requests')
+          .select(`
+            id,
+            tenant_id,
+            title,
+            description,
+            priority,
+            status,
+            created_at,
+            properties ( title ),
+            profiles ( full_name )
+          `)
+          .neq('status', 'resolved')
+          .order('created_at', { ascending: false });
 
-      // 4. Fetch feedback
-      const { data: feedData, error: feedError } = await supabase
-        .from('feedback')
-        .select(`
-          id,
-          type,
-          message,
-          created_at,
-          profiles ( full_name, email )
-        `)
-        .order('created_at', { ascending: false });
+        if (maintError) throw maintError;
+        maintData = maintResult;
+        setMaintenanceRequests((maintResult as any) || []);
 
-      if (feedError) throw feedError;
-      setFeedback((feedData as any) || []);
+        // 4. Fetch feedback
+        const { data: feedData, error: feedError } = await supabase
+          .from('feedback')
+          .select(`
+            id,
+            type,
+            message,
+            created_at,
+            profiles!feedback_user_id_fkey ( full_name, email )
+          `)
+          .order('created_at', { ascending: false });
+
+        if (feedError) throw feedError;
+        setFeedback((feedData as any) || []);
+      }
 
       // 5. Fetch sum of verified payments
       const { data: verifiedPays } = await supabase
@@ -185,18 +250,24 @@ export default function AdminDashboard() {
         .select('*', { count: 'exact', head: true })
         .eq('status', 'active');
 
-      // 7. Fetch count of pending bookings
-      const { count: bookingCount } = await supabase
-        .from('bookings')
-        .select('*', { count: 'exact', head: true })
-        .eq('status', 'pending');
+      let bookingCount = 0;
+      let openMaintCount = 0;
 
-      const openMaintCount = maintData ? maintData.length : 0;
+      if (!isFinance) {
+        // 7. Fetch count of pending bookings
+        const { count: bookCount } = await supabase
+          .from('bookings')
+          .select('*', { count: 'exact', head: true })
+          .eq('status', 'pending');
+
+        bookingCount = bookCount || 0;
+        openMaintCount = maintData ? maintData.length : 0;
+      }
 
       setStats({
         totalRevenue: sum,
         activeLeases: leaseCount || 0,
-        pendingBookings: bookingCount || 0,
+        pendingBookings: bookingCount,
         openMaintenance: openMaintCount,
       });
 
@@ -209,11 +280,23 @@ export default function AdminDashboard() {
   };
 
   useEffect(() => {
+    // Wait until the role is known so finance vs admin queries run correctly.
+    if (roleLoading) return;
     fetchDashboardData();
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [roleLoading, isFinance]);
+
+  // Keep the active tab valid if the role restricts the available tabs.
+  useEffect(() => {
+    if (!availableTabs.includes(activeTab)) {
+      setActiveTab(availableTabs[0]);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isFinance]);
 
   const handleVerifyPayment = async (id: string, action: 'verified' | 'failed') => {
     try {
+      const current = payments.find((p) => p.id === id);
       const { error } = await supabase
         .from('payments')
         .update({ status: action })
@@ -223,6 +306,19 @@ export default function AdminDashboard() {
 
       Alert.alert('Success', `Payment reference marked as ${action === 'verified' ? 'Verified' : 'Failed'}.`);
       setPayments((prev) => prev.filter((p) => p.id !== id));
+      if (current) {
+        await notifyUser({
+          userId: current.payer_id,
+          type: 'payment_confirmed',
+          title: action === 'verified' ? 'Payment Verified' : 'Payment Rejected',
+          body:
+            action === 'verified'
+              ? `Your payment reference ${current.reference_code} has been verified.`
+              : `Your payment reference ${current.reference_code} was marked as failed. Please resubmit.`,
+          entityType: 'payment',
+          entityId: current.id,
+        });
+      }
       // Refresh statistics after verifying
       fetchDashboardData();
     } catch (err: any) {
@@ -251,6 +347,7 @@ export default function AdminDashboard() {
 
   const handleUpdateMaintenanceStatus = async (id: string, nextStatus: 'pending' | 'in_progress' | 'resolved') => {
     try {
+      const current = maintenanceRequests.find((m) => m.id === id);
       const { error } = await supabase
         .from('maintenance_requests')
         .update({ status: nextStatus })
@@ -265,6 +362,16 @@ export default function AdminDashboard() {
         setMaintenanceRequests((prev) =>
           prev.map((m) => (m.id === id ? { ...m, status: nextStatus } : m))
         );
+      }
+      if (current) {
+        await notifyUser({
+          userId: current.tenant_id,
+          type: 'maintenance_update',
+          title: 'Maintenance Status Updated',
+          body: `Your maintenance ticket "${current.title}" is now ${nextStatus.replace('_', ' ')}.`,
+          entityType: 'maintenance',
+          entityId: current.id,
+        });
       }
       fetchDashboardData();
     } catch (err: any) {
@@ -309,355 +416,302 @@ export default function AdminDashboard() {
     });
   };
 
+  const firstName = user?.firstName || user?.fullName?.split(' ')[0] || 'Admin';
+  const todayLabel = new Date().toLocaleDateString('en-KE', {
+    weekday: 'long',
+    month: 'long',
+    day: 'numeric',
+  });
+
+  const tabItems = availableTabs.map((tab) => {
+    const labels: Record<DashboardTab, string> = {
+      payments: 'Payments',
+      bookings: 'Bookings',
+      maintenance: 'Maint.',
+      feedback: 'Feedback',
+    };
+    const icons = {
+      payments: CreditCard,
+      bookings: Calendar,
+      maintenance: Wrench,
+      feedback: MessageSquare,
+    };
+    const counts: Record<DashboardTab, number> = {
+      payments: payments.length,
+      bookings: bookings.length,
+      maintenance: maintenanceRequests.length,
+      feedback: feedback.length,
+    };
+    return { key: tab, label: labels[tab], icon: icons[tab], count: counts[tab] };
+  });
+
   const renderPaymentItem = (item: Payment) => (
-    <View style={styles.card}>
-      <View style={styles.cardHeader}>
-        <Text style={styles.propTitle}>
-          {item.leases?.properties?.title || 'Rent Payment'}
-        </Text>
-        <View style={styles.badge}>
-          <Text style={styles.badgeText}>{item.payment_method.toUpperCase()}</Text>
-        </View>
-      </View>
-
+    <QueueCard
+      title={item.leases?.properties?.title || 'Rent Payment'}
+      badge={{ label: item.payment_method.toUpperCase() }}
+      accentColor={adminTheme.colors.accent}
+      actions={
+        <>
+          <QueueCardActionButton
+            label="Reject"
+            variant="danger"
+            onPress={() => handleVerifyPayment(item.id, 'failed')}
+            icon={<X size={16} color={adminTheme.colors.danger} style={styles.btnIcon} />}
+          />
+          <QueueCardActionButton
+            label="Verify"
+            variant="primary"
+            onPress={() => handleVerifyPayment(item.id, 'verified')}
+            icon={<CheckCircle size={16} color={adminTheme.colors.onAccent} style={styles.btnIcon} />}
+          />
+        </>
+      }
+    >
       <Text style={styles.amount}>{formatPrice(item.amount)}</Text>
-      <Text style={styles.refCode}>Reference: <Text style={styles.boldText}>{item.reference_code}</Text></Text>
-
-      <View style={styles.divider} />
-
-      <View style={styles.infoRow}>
-        <User size={16} color="#38BDF8" style={styles.icon} />
-        <View>
-          <Text style={styles.clientName}>{item.profiles?.full_name}</Text>
-          <Text style={styles.clientEmail}>{item.profiles?.email}</Text>
-        </View>
-      </View>
-
+      <Text style={styles.refCode}>
+        Reference: <Text style={styles.boldText}>{item.reference_code}</Text>
+      </Text>
+      <QueueCardDivider />
+      <QueueCardInfoRow icon={<User size={16} color={adminTheme.colors.accent} style={styles.icon} />}>
+        <Text style={styles.clientName}>{item.profiles?.full_name}</Text>
+        <Text style={styles.clientEmail}>{item.profiles?.email}</Text>
+      </QueueCardInfoRow>
       <Text style={styles.dateText}>Submitted: {formatDate(item.payment_date)}</Text>
-
-      <View style={styles.actionRow}>
-        <TouchableOpacity
-          style={[styles.actionBtn, styles.rejectBtn]}
-          onPress={() => handleVerifyPayment(item.id, 'failed')}
-        >
-          <X size={16} color="#EF4444" style={styles.btnIcon} />
-          <Text style={styles.rejectText}>Reject</Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity
-          style={[styles.actionBtn, styles.approveBtn]}
-          onPress={() => handleVerifyPayment(item.id, 'verified')}
-        >
-          <Check size={16} color="#0F172A" style={styles.btnIcon} />
-          <Text style={styles.approveText}>Verify & Approve</Text>
-        </TouchableOpacity>
-      </View>
-    </View>
+    </QueueCard>
   );
 
   const renderBookingItem = (item: Booking) => {
-    const formatBookingDate = (dateStr: string) => {
-      const d = new Date(dateStr);
-      return d.toLocaleDateString('en-KE', {
+    const formatBookingDate = (dateStr: string) =>
+      new Date(dateStr).toLocaleDateString('en-KE', {
         weekday: 'short',
         year: 'numeric',
         month: 'short',
         day: 'numeric',
       });
-    };
 
-    const formatBookingTime = (dateStr: string) => {
-      const d = new Date(dateStr);
-      return d.toLocaleTimeString('en-KE', {
-        hour: '2-digit',
-        minute: '2-digit',
-      });
-    };
+    const formatBookingTime = (dateStr: string) =>
+      new Date(dateStr).toLocaleTimeString('en-KE', { hour: '2-digit', minute: '2-digit' });
+
+    const typeColors =
+      item.type === 'reservation'
+        ? { bg: 'rgba(234, 179, 8, 0.15)', border: adminTheme.colors.warning, text: adminTheme.colors.warning }
+        : { bg: adminTheme.colors.accentMuted, border: adminTheme.colors.accent, text: adminTheme.colors.accent };
 
     return (
-      <View style={styles.card}>
-        <View style={styles.cardHeader}>
-          <Text style={styles.propTitle}>{item.properties?.title}</Text>
-          <View style={[
-            styles.badge,
-            item.type === 'reservation' ? styles.badgeReservation : styles.badgeViewing
-          ]}>
-            <Text style={styles.badgeText}>{item.type.toUpperCase()}</Text>
-          </View>
-        </View>
-
+      <QueueCard
+        title={item.properties?.title}
+        badge={{ label: item.type.toUpperCase(), ...typeColors }}
+        accentColor={typeColors.text}
+        actions={
+          <>
+            <QueueCardActionButton
+              label="Decline"
+              variant="danger"
+              onPress={() => handleVerifyBooking(item.id, 'declined')}
+              icon={<X size={16} color={adminTheme.colors.danger} style={styles.btnIcon} />}
+            />
+            <QueueCardActionButton
+              label="Approve"
+              variant="primary"
+              onPress={() => handleVerifyBooking(item.id, 'approved')}
+              icon={<CheckCircle size={16} color={adminTheme.colors.onAccent} style={styles.btnIcon} />}
+            />
+          </>
+        }
+      >
         <Text style={styles.locationText}>{item.properties?.location}</Text>
-
-        <View style={styles.divider} />
-
-        <View style={styles.infoRow}>
-          <User size={16} color="#38BDF8" style={styles.icon} />
-          <View>
-            <Text style={styles.clientName}>{item.profiles?.full_name}</Text>
-            <Text style={styles.clientEmail}>{item.profiles?.email} | {item.profiles?.phone || 'No phone'}</Text>
-          </View>
-        </View>
-
-        <View style={styles.infoRow}>
-          <Calendar size={16} color="#38BDF8" style={styles.icon} />
-          <Text style={styles.cardDateText}>{formatBookingDate(item.booking_date)} at {formatBookingTime(item.booking_date)}</Text>
-        </View>
-
+        <QueueCardDivider />
+        <QueueCardInfoRow icon={<User size={16} color={adminTheme.colors.accent} style={styles.icon} />}>
+          <Text style={styles.clientName}>{item.profiles?.full_name}</Text>
+          <Text style={styles.clientEmail}>
+            {item.profiles?.email} | {item.profiles?.phone || 'No phone'}
+          </Text>
+        </QueueCardInfoRow>
+        <QueueCardInfoRow icon={<Calendar size={16} color={adminTheme.colors.accent} style={styles.icon} />}>
+          <Text style={styles.cardDateText}>
+            {formatBookingDate(item.booking_date)} at {formatBookingTime(item.booking_date)}
+          </Text>
+        </QueueCardInfoRow>
         {item.notes ? (
           <View style={styles.noteBox}>
-            <FileText size={14} color="#94A3B8" style={styles.noteIcon} />
+            <FileText size={14} color={adminTheme.colors.textMuted} style={styles.noteIcon} />
             <Text style={styles.noteText}>{item.notes}</Text>
           </View>
         ) : null}
-
-        <View style={styles.actionRow}>
-          <TouchableOpacity
-            style={[styles.actionBtn, styles.rejectBtn]}
-            onPress={() => handleVerifyBooking(item.id, 'declined')}
-          >
-            <X size={16} color="#EF4444" style={styles.btnIcon} />
-            <Text style={styles.rejectText}>Decline</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[styles.actionBtn, styles.approveBtn]}
-            onPress={() => handleVerifyBooking(item.id, 'approved')}
-          >
-            <Check size={16} color="#0F172A" style={styles.btnIcon} />
-            <Text style={styles.approveText}>Approve</Text>
-          </TouchableOpacity>
-        </View>
-      </View>
+      </QueueCard>
     );
   };
 
   const renderMaintenanceItem = (item: MaintenanceRequest) => {
-    const getPriorityColors = (p: string) => {
-      switch (p) {
-        case 'high':
-          return { bg: 'rgba(239, 68, 68, 0.15)', border: '#EF4444', text: '#EF4444' };
-        case 'medium':
-          return { bg: 'rgba(234, 179, 8, 0.15)', border: '#EAB308', text: '#EAB308' };
-        default:
-          return { bg: 'rgba(16, 185, 129, 0.15)', border: '#10B981', text: '#10B981' };
-      }
-    };
-
-    const formatMaintDate = (dateStr: string) => {
-      return new Date(dateStr).toLocaleDateString('en-KE', {
-        year: 'numeric',
-        month: 'short',
-        day: 'numeric',
-      });
-    };
-
     const colors = getPriorityColors(item.priority);
+    const formatMaintDate = (dateStr: string) =>
+      new Date(dateStr).toLocaleDateString('en-KE', { year: 'numeric', month: 'short', day: 'numeric' });
 
     return (
-      <View style={styles.card}>
-        <View style={styles.cardHeader}>
-          <Text style={styles.propTitle}>{item.title}</Text>
-          <View style={[styles.badge, { backgroundColor: colors.bg, borderColor: colors.border }]}>
-            <Text style={[styles.badgeText, { color: colors.text }]}>{item.priority.toUpperCase()}</Text>
-          </View>
-        </View>
-
-        <Text style={styles.locationText}>Property: {item.properties?.title}</Text>
-
-        <View style={styles.divider} />
-
-        <Text style={styles.maintDesc}>{item.description}</Text>
-
-        <View style={styles.infoRow}>
-          <User size={16} color="#38BDF8" style={styles.icon} />
-          <Text style={styles.clientName}>Tenant: {item.profiles?.full_name}</Text>
-        </View>
-
-        <View style={styles.infoRow}>
-          <Clock size={16} color="#38BDF8" style={styles.icon} />
-          <Text style={styles.cardDateText}>
-            Reported: {formatMaintDate(item.created_at)} • Status: <Text style={{ color: item.status === 'in_progress' ? '#38BDF8' : '#EAB308', fontWeight: 'bold' }}>{item.status.replace('_', ' ').toUpperCase()}</Text>
-          </Text>
-        </View>
-
-        <View style={styles.actionRow}>
-          {item.status === 'pending' && (
-            <TouchableOpacity
-              style={[styles.actionBtn, styles.pendingMaintBtn]}
-              onPress={() => handleUpdateMaintenanceStatus(item.id, 'in_progress')}
-            >
-              <Clock size={16} color="#38BDF8" style={styles.btnIcon} />
-              <Text style={styles.pendingMaintText}>Start Work</Text>
-            </TouchableOpacity>
-          )}
-
-          {item.status === 'in_progress' && (
-            <View style={{ flex: 1, paddingRight: 4 }}>
+      <QueueCard
+        title={item.title}
+        badge={{ label: item.priority.toUpperCase(), ...colors }}
+        accentColor={colors.text}
+        actions={
+          <>
+            {item.status === 'pending' ? (
+              <QueueCardActionButton
+                label="Start Work"
+                variant="outline"
+                onPress={() => handleUpdateMaintenanceStatus(item.id, 'in_progress')}
+                icon={<Clock size={16} color={adminTheme.colors.accent} style={styles.btnIcon} />}
+              />
+            ) : null}
+            {item.status === 'in_progress' ? (
               <View style={styles.inProgressBadge}>
-                <Clock size={14} color="#38BDF8" style={{ marginRight: 4 }} />
+                <Clock size={14} color={adminTheme.colors.accent} style={styles.btnIcon} />
                 <Text style={styles.inProgressBadgeText}>In Progress</Text>
               </View>
-            </View>
-          )}
-
-          <TouchableOpacity
-            style={[styles.actionBtn, styles.resolveBtn]}
-            onPress={() => handleUpdateMaintenanceStatus(item.id, 'resolved')}
-          >
-            <CheckCircle size={16} color="#0F172A" style={styles.btnIcon} />
-            <Text style={styles.resolveText}>Mark Resolved</Text>
+            ) : null}
+            <QueueCardActionButton
+              label="Resolve"
+              variant="primary"
+              onPress={() => handleUpdateMaintenanceStatus(item.id, 'resolved')}
+              icon={<CheckCircle size={16} color={adminTheme.colors.onAccent} style={styles.btnIcon} />}
+              flex={item.status === 'pending' ? 1 : 1}
+            />
+          </>
+        }
+        footer={
+          <TouchableOpacity style={styles.materialsRow} onPress={() => setMaterialsRequest(item)}>
+            <Package size={14} color={adminTheme.colors.textMuted} style={styles.btnIcon} />
+            <Text style={styles.materialsRowText}>Record materials used</Text>
           </TouchableOpacity>
-        </View>
-      </View>
+        }
+      >
+        <Text style={styles.locationText}>Property: {item.properties?.title}</Text>
+        <QueueCardDivider />
+        <Text style={styles.maintDesc}>{item.description}</Text>
+        <QueueCardInfoRow icon={<User size={16} color={adminTheme.colors.accent} style={styles.icon} />}>
+          <Text style={styles.clientName}>Tenant: {item.profiles?.full_name}</Text>
+        </QueueCardInfoRow>
+        <QueueCardInfoRow icon={<Clock size={16} color={adminTheme.colors.accent} style={styles.icon} />}>
+          <Text style={styles.cardDateText}>
+            Reported: {formatMaintDate(item.created_at)} •{' '}
+            <Text
+              style={{
+                color: item.status === 'in_progress' ? adminTheme.colors.accent : adminTheme.colors.warning,
+                fontWeight: '700',
+              }}
+            >
+              {item.status.replace('_', ' ').toUpperCase()}
+            </Text>
+          </Text>
+        </QueueCardInfoRow>
+      </QueueCard>
     );
   };
 
   const renderFeedbackItem = (item: Feedback) => {
-    const getFeedbackBadgeColors = (type: string) => {
-      switch (type) {
-        case 'complaint':
-          return { bg: 'rgba(239, 68, 68, 0.15)', border: '#EF4444', text: '#EF4444' };
-        case 'suggestion':
-          return { bg: 'rgba(56, 189, 248, 0.15)', border: '#38BDF8', text: '#38BDF8' };
-        default:
-          return { bg: 'rgba(234, 179, 8, 0.15)', border: '#EAB308', text: '#EAB308' };
-      }
-    };
-
-    const formatFeedbackDate = (dateStr: string) => {
-      return new Date(dateStr).toLocaleDateString('en-KE', {
+    const colors = getFeedbackBadgeColors(item.type);
+    const formatFeedbackDate = (dateStr: string) =>
+      new Date(dateStr).toLocaleDateString('en-KE', {
         year: 'numeric',
         month: 'short',
         day: 'numeric',
         hour: '2-digit',
         minute: '2-digit',
       });
-    };
-
-    const colors = getFeedbackBadgeColors(item.type);
 
     return (
-      <View style={styles.card}>
-        <View style={styles.cardHeader}>
-          <Text style={styles.feedbackUser}>{item.profiles?.full_name || 'Anonymous User'}</Text>
-          <View style={[styles.badge, { backgroundColor: colors.bg, borderColor: colors.border }]}>
-            <Text style={[styles.badgeText, { color: colors.text }]}>{item.type.toUpperCase()}</Text>
-          </View>
-        </View>
-
+      <QueueCard
+        title={item.profiles?.full_name || 'Anonymous User'}
+        badge={{ label: item.type.toUpperCase(), ...colors }}
+        accentColor={colors.text}
+        actions={
+          <QueueCardActionButton
+            label="Dismiss"
+            variant="danger"
+            onPress={() => handleDeleteFeedback(item.id)}
+            icon={<X size={16} color={adminTheme.colors.danger} style={styles.btnIcon} />}
+          />
+        }
+      >
         <Text style={styles.clientEmail}>{item.profiles?.email}</Text>
-
-        <View style={styles.divider} />
-
+        <QueueCardDivider />
         <View style={styles.feedbackContentBox}>
-          <MessageSquare size={16} color="#94A3B8" style={styles.noteIcon} />
+          <MessageSquare size={16} color={adminTheme.colors.textMuted} style={styles.noteIcon} />
           <Text style={styles.feedbackMessage}>{item.message}</Text>
         </View>
-
         <Text style={styles.feedbackDate}>Submitted: {formatFeedbackDate(item.created_at)}</Text>
-
-        <View style={styles.actionRow}>
-          <TouchableOpacity
-            style={[styles.actionBtn, styles.deleteFeedbackBtn]}
-            onPress={() => handleDeleteFeedback(item.id)}
-          >
-            <X size={16} color="#EF4444" style={styles.btnIcon} />
-            <Text style={styles.deleteFeedbackText}>Dismiss / Delete</Text>
-          </TouchableOpacity>
-        </View>
-      </View>
+      </QueueCard>
     );
   };
 
-  const renderSegmentedControl = () => (
-    <View style={styles.segmentContainer}>
-      {(['payments', 'bookings', 'maintenance', 'feedback'] as const).map((tab) => {
-        const getTabLabel = (t: string) => {
-          switch (t) {
-            case 'payments': return 'Payments';
-            case 'bookings': return 'Bookings';
-            case 'maintenance': return 'Maint';
-            case 'feedback': return 'Feedback';
-            default: return '';
-          }
-        };
-
-        const getTabIcon = (t: string, color: string) => {
-          switch (t) {
-            case 'payments': return <CreditCard size={12} color={color} style={styles.tabIcon} />;
-            case 'bookings': return <Calendar size={12} color={color} style={styles.tabIcon} />;
-            case 'maintenance': return <Wrench size={12} color={color} style={styles.tabIcon} />;
-            case 'feedback': return <MessageSquare size={12} color={color} style={styles.tabIcon} />;
-            default: return null;
-          }
-        };
-
-        const isActive = activeTab === tab;
-        const color = isActive ? '#38BDF8' : '#94A3B8';
-
-        return (
-          <TouchableOpacity
-            key={tab}
-            style={[styles.segmentBtn, isActive && styles.segmentBtnActive]}
-            onPress={() => setActiveTab(tab)}
-          >
-            {getTabIcon(tab, color)}
-            <Text style={[styles.segmentText, isActive && styles.segmentTextActive]}>
-              {getTabLabel(tab)}
-            </Text>
-          </TouchableOpacity>
-        );
-      })}
-    </View>
-  );
-
   const renderHeader = () => {
-    const getListTitle = () => {
-      switch (activeTab) {
-        case 'payments': return 'Pending Payment Proofs';
-        case 'bookings': return 'Pending Viewing / Reservations';
-        case 'maintenance': return 'Active Maintenance Tickets';
-        case 'feedback': return 'User Feedback & Complaints';
-        default: return '';
-      }
+    const listTitles: Record<DashboardTab, string> = {
+      payments: 'Pending Payment Proofs',
+      bookings: 'Pending Viewing / Reservations',
+      maintenance: 'Active Maintenance Tickets',
+      feedback: 'User Feedback & Complaints',
     };
 
     return (
       <View style={styles.statsContainer}>
+        <Text style={styles.greeting}>
+          {getGreeting()}, {firstName}
+        </Text>
+        <Text style={styles.dateLabel}>{todayLabel}</Text>
+        <Text style={styles.hubSubtitle}>
+          {isFinance ? 'Payment Verification' : 'Operations Hub'}
+        </Text>
+
         <Text style={styles.statsTitle}>Overview Insights</Text>
         <View style={styles.statsGrid}>
-          <View style={styles.statBox}>
-            <Text style={styles.statLabel}>Revenue</Text>
-            <Text style={styles.statVal}>{formatPrice(stats.totalRevenue)}</Text>
-          </View>
-          <View style={styles.statBox}>
-            <Text style={styles.statLabel}>Leases</Text>
-            <Text style={styles.statVal}>{stats.activeLeases}</Text>
-          </View>
-          <View style={styles.statBox}>
-            <Text style={styles.statLabel}>Bookings</Text>
-            <Text style={styles.statVal}>{stats.pendingBookings}</Text>
-          </View>
-          <View style={styles.statBox}>
-            <Text style={styles.statLabel}>Maint.</Text>
-            <Text style={styles.statVal}>{stats.openMaintenance}</Text>
-          </View>
+          <StatCard
+            label="Revenue"
+            value={formatPrice(stats.totalRevenue)}
+            icon={Wallet}
+            accentColor={adminTheme.colors.accent}
+          />
+          <StatCard
+            label="Leases"
+            value={String(stats.activeLeases)}
+            icon={LeaseIcon}
+            accentColor={adminTheme.colors.success}
+          />
+          {!isFinance ? (
+            <>
+              <StatCard
+                label="Bookings"
+                value={String(stats.pendingBookings)}
+                icon={Calendar}
+                accentColor={adminTheme.colors.warning}
+              />
+              <StatCard
+                label="Maintenance"
+                value={String(stats.openMaintenance)}
+                icon={Wrench}
+                accentColor={adminTheme.colors.danger}
+              />
+            </>
+          ) : null}
         </View>
 
-        {renderSegmentedControl()}
+        <SegmentedTabs tabs={tabItems} activeKey={activeTab} onChange={(key) => setActiveTab(key as DashboardTab)} />
 
-        <Text style={styles.listTitle}>{getListTitle()}</Text>
+        <Text style={styles.listTitle}>{listTitles[activeTab]}</Text>
       </View>
     );
   };
 
   const getActiveData = () => {
     switch (activeTab) {
-      case 'payments': return payments;
-      case 'bookings': return bookings;
-      case 'maintenance': return maintenanceRequests;
-      case 'feedback': return feedback;
-      default: return [];
+      case 'payments':
+        return payments;
+      case 'bookings':
+        return bookings;
+      case 'maintenance':
+        return maintenanceRequests;
+      case 'feedback':
+        return feedback;
+      default:
+        return [];
     }
   };
 
@@ -678,20 +732,25 @@ export default function AdminDashboard() {
 
   const getEmptyMessage = () => {
     switch (activeTab) {
-      case 'payments': return 'No pending rent payments awaiting verification.';
-      case 'bookings': return 'No pending viewing or reservation requests.';
-      case 'maintenance': return 'No active maintenance tickets pending attention.';
-      case 'feedback': return 'No feedback logs found.';
-      default: return 'No items found.';
+      case 'payments':
+        return 'No pending rent payments awaiting verification.';
+      case 'bookings':
+        return 'No pending viewing or reservation requests.';
+      case 'maintenance':
+        return 'No active maintenance tickets pending attention.';
+      case 'feedback':
+        return 'No feedback logs found.';
+      default:
+        return 'No items found.';
     }
   };
 
+  const initialLoad = loading && payments.length === 0 && !roleLoading;
+
   return (
     <View style={styles.container}>
-      {loading ? (
-        <View style={styles.centered}>
-          <ActivityIndicator size="large" color="#38BDF8" />
-        </View>
+      {initialLoad ? (
+        <DashboardSkeleton />
       ) : (
         <FlatList
           data={getActiveData()}
@@ -703,12 +762,20 @@ export default function AdminDashboard() {
           refreshing={loading}
           ListEmptyComponent={
             <View style={styles.emptyCentered}>
-              <ShieldAlert size={48} color="#94A3B8" style={styles.emptyIcon} />
+              <ShieldAlert size={48} color={adminTheme.colors.textMuted} style={styles.emptyIcon} />
               <Text style={styles.emptyText}>{getEmptyMessage()}</Text>
             </View>
           }
         />
       )}
+
+      <MaterialsUsedModal
+        visible={!!materialsRequest}
+        onClose={() => setMaterialsRequest(null)}
+        maintenanceRequestId={materialsRequest?.id || ''}
+        maintenanceTitle={materialsRequest?.title || ''}
+        userId={user?.id || ''}
+      />
     </View>
   );
 }
@@ -716,331 +783,174 @@ export default function AdminDashboard() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#0F172A',
+    backgroundColor: adminTheme.colors.bg,
   },
   listContainer: {
-    padding: 16,
+    padding: adminTheme.spacing.lg,
+    paddingBottom: adminTheme.spacing.xxl,
   },
   statsContainer: {
-    marginBottom: 20,
+    marginBottom: adminTheme.spacing.lg,
+  },
+  greeting: {
+    fontSize: 22,
+    fontWeight: '700',
+    color: adminTheme.colors.text,
+    marginBottom: 4,
+  },
+  dateLabel: {
+    fontSize: 13,
+    color: adminTheme.colors.textMuted,
+    marginBottom: 4,
+  },
+  hubSubtitle: {
+    fontSize: 14,
+    color: adminTheme.colors.accent,
+    fontWeight: '600',
+    marginBottom: adminTheme.spacing.lg,
   },
   statsTitle: {
-    fontSize: 16,
-    fontWeight: 'bold',
-    color: '#F8FAFC',
-    marginBottom: 10,
+    fontSize: 14,
+    fontWeight: '700',
+    color: adminTheme.colors.textMuted,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    marginBottom: adminTheme.spacing.sm,
   },
   statsGrid: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginBottom: 20,
-  },
-  statBox: {
-    flex: 1,
-    backgroundColor: '#1E293B',
-    borderColor: '#334155',
-    borderWidth: 1,
-    borderRadius: 8,
-    padding: 12,
-    marginHorizontal: 4,
-    alignItems: 'center',
-  },
-  statLabel: {
-    color: '#94A3B8',
-    fontSize: 11,
-    marginBottom: 4,
-  },
-  statVal: {
-    color: '#38BDF8',
-    fontSize: 14,
-    fontWeight: 'bold',
+    flexWrap: 'wrap',
+    marginHorizontal: -adminTheme.spacing.xs,
+    marginBottom: adminTheme.spacing.lg,
   },
   listTitle: {
     fontSize: 16,
-    fontWeight: 'bold',
-    color: '#F8FAFC',
-    marginBottom: 10,
-  },
-  card: {
-    backgroundColor: '#1E293B',
-    borderRadius: 12,
-    padding: 16,
-    marginBottom: 16,
-    borderColor: '#334155',
-    borderWidth: 1,
-  },
-  cardHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 8,
-  },
-  propTitle: {
-    fontSize: 15,
-    fontWeight: 'bold',
-    color: '#94A3B8',
-    flex: 1,
-    marginRight: 8,
-  },
-  badge: {
-    backgroundColor: 'rgba(56, 189, 248, 0.1)',
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 6,
-    borderColor: '#38BDF8',
-    borderWidth: 1,
-  },
-  badgeText: {
-    color: '#38BDF8',
-    fontSize: 10,
-    fontWeight: 'bold',
+    fontWeight: '700',
+    color: adminTheme.colors.text,
+    marginBottom: adminTheme.spacing.sm,
   },
   amount: {
     fontSize: 24,
-    fontWeight: 'bold',
-    color: '#F8FAFC',
+    fontWeight: '700',
+    color: adminTheme.colors.text,
     marginVertical: 6,
   },
   refCode: {
-    color: '#38BDF8',
+    color: adminTheme.colors.accent,
     fontSize: 14,
     fontWeight: '500',
   },
   boldText: {
-    color: '#F8FAFC',
-    fontWeight: 'bold',
-  },
-  divider: {
-    height: 1,
-    backgroundColor: '#334155',
-    marginVertical: 12,
-  },
-  infoRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 10,
+    color: adminTheme.colors.text,
+    fontWeight: '700',
   },
   icon: {
     marginRight: 10,
   },
   clientName: {
-    color: '#F8FAFC',
+    color: adminTheme.colors.text,
     fontSize: 14,
     fontWeight: '600',
   },
   clientEmail: {
-    color: '#94A3B8',
+    color: adminTheme.colors.textMuted,
     fontSize: 12,
   },
   dateText: {
     fontSize: 11,
-    color: '#64748B',
-    marginBottom: 14,
-  },
-  actionRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginTop: 10,
-  },
-  actionBtn: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 12,
-    borderRadius: 8,
-  },
-  rejectBtn: {
-    borderColor: '#EF4444',
-    borderWidth: 1,
-    marginRight: 8,
-  },
-  approveBtn: {
-    backgroundColor: '#38BDF8',
-    marginLeft: 8,
+    color: adminTheme.colors.textDim,
   },
   btnIcon: {
     marginRight: 6,
   },
-  rejectText: {
-    color: '#EF4444',
-    fontWeight: 'bold',
-  },
-  approveText: {
-    color: '#0F172A',
-    fontWeight: 'bold',
-  },
-  centered: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 24,
-  },
-  emptyCentered: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: 32,
-  },
-  emptyIcon: {
-    marginBottom: 16,
-  },
-  emptyText: {
-    color: '#94A3B8',
-    fontSize: 15,
-    textAlign: 'center',
-  },
-  
-  // Segmented Control Styles
-  segmentContainer: {
-    flexDirection: 'row',
-    backgroundColor: '#1E293B',
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#334155',
-    padding: 4,
-    marginBottom: 20,
-  },
-  segmentBtn: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 10,
-    borderRadius: 6,
-  },
-  segmentBtnActive: {
-    backgroundColor: 'rgba(56, 189, 248, 0.1)',
-    borderColor: 'rgba(56, 189, 248, 0.2)',
-    borderWidth: 1,
-  },
-  segmentText: {
-    color: '#94A3B8',
-    fontSize: 10,
-    fontWeight: '600',
-    marginLeft: 4,
-  },
-  segmentTextActive: {
-    color: '#38BDF8',
-    fontWeight: 'bold',
-  },
-  tabIcon: {
-    marginRight: 2,
-  },
-  
-  // Booking Custom Styles
   locationText: {
     fontSize: 13,
-    color: '#94A3B8',
-    marginTop: 2,
-    marginBottom: 6,
+    color: adminTheme.colors.textMuted,
+    marginBottom: 4,
   },
   cardDateText: {
-    color: '#F8FAFC',
+    color: adminTheme.colors.text,
     fontSize: 14,
   },
   noteBox: {
     flexDirection: 'row',
-    backgroundColor: '#0F172A',
-    borderRadius: 6,
+    backgroundColor: adminTheme.colors.bg,
+    borderRadius: adminTheme.radius.sm,
     padding: 10,
     marginTop: 6,
-    marginBottom: 14,
   },
   noteIcon: {
     marginRight: 6,
     marginTop: 2,
   },
   noteText: {
-    color: '#94A3B8',
+    color: adminTheme.colors.textMuted,
     fontSize: 13,
     flex: 1,
   },
-  badgeReservation: {
-    backgroundColor: 'rgba(234, 179, 8, 0.15)',
-    borderColor: '#EAB308',
-    borderWidth: 1,
-  },
-  badgeViewing: {
-    backgroundColor: 'rgba(56, 189, 248, 0.15)',
-    borderColor: '#38BDF8',
-    borderWidth: 1,
-  },
-
-  // Maintenance Custom Styles
   maintDesc: {
-    color: '#94A3B8',
+    color: adminTheme.colors.textMuted,
     fontSize: 14,
     lineHeight: 20,
-    marginBottom: 14,
-  },
-  pendingMaintBtn: {
-    borderColor: '#38BDF8',
-    borderWidth: 1,
-    marginRight: 8,
-  },
-  pendingMaintText: {
-    color: '#38BDF8',
-    fontWeight: 'bold',
-  },
-  resolveBtn: {
-    backgroundColor: '#38BDF8',
-    marginLeft: 8,
-  },
-  resolveText: {
-    color: '#0F172A',
-    fontWeight: 'bold',
+    marginBottom: adminTheme.spacing.sm,
   },
   inProgressBadge: {
+    flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: 'rgba(56, 189, 248, 0.1)',
-    borderColor: '#38BDF8',
+    backgroundColor: adminTheme.colors.accentMuted,
+    borderColor: adminTheme.colors.accent,
     borderWidth: 1,
-    borderRadius: 8,
+    borderRadius: adminTheme.radius.sm,
     paddingVertical: 12,
-    marginRight: 8,
+    marginRight: adminTheme.spacing.sm,
   },
   inProgressBadgeText: {
-    color: '#38BDF8',
-    fontWeight: 'bold',
+    color: adminTheme.colors.accent,
+    fontWeight: '700',
     fontSize: 12,
   },
-
-  // Feedback Custom Styles
-  feedbackUser: {
-    fontSize: 15,
-    fontWeight: 'bold',
-    color: '#F8FAFC',
-    flex: 1,
-    marginRight: 8,
+  materialsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  materialsRowText: {
+    color: adminTheme.colors.textMuted,
+    fontSize: 12,
+    fontWeight: '500',
   },
   feedbackContentBox: {
     flexDirection: 'row',
-    backgroundColor: '#0F172A',
-    borderRadius: 8,
-    padding: 12,
+    backgroundColor: adminTheme.colors.bg,
+    borderRadius: adminTheme.radius.sm,
+    padding: adminTheme.spacing.md,
     marginVertical: 6,
   },
   feedbackMessage: {
-    color: '#F8FAFC',
+    color: adminTheme.colors.text,
     fontSize: 14,
     lineHeight: 20,
     flex: 1,
   },
   feedbackDate: {
     fontSize: 11,
-    color: '#64748B',
-    marginVertical: 10,
+    color: adminTheme.colors.textDim,
+    marginTop: 6,
   },
-  deleteFeedbackBtn: {
-    borderColor: '#EF4444',
-    borderWidth: 1,
-    flex: 1,
+  emptyCentered: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: adminTheme.spacing.xxl,
   },
-  deleteFeedbackText: {
-    color: '#EF4444',
-    fontWeight: 'bold',
+  emptyIcon: {
+    marginBottom: adminTheme.spacing.lg,
+  },
+  emptyText: {
+    color: adminTheme.colors.textMuted,
+    fontSize: 15,
+    textAlign: 'center',
   },
 });
 

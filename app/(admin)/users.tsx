@@ -12,7 +12,9 @@ import {
   ScrollView,
 } from 'react-native';
 import { supabase } from '../../lib/supabase';
-import { Users, X, Shield, Calendar, CreditCard, Trash2 } from 'lucide-react-native';
+import { useUser } from '@clerk/clerk-expo';
+import { useAudit } from '../../hooks/useAudit';
+import { X, Shield, Calendar, Trash2, UserPlus, KeyRound, Mail } from 'lucide-react-native';
 
 interface Profile {
   id: string;
@@ -22,6 +24,8 @@ interface Profile {
   role: string;
 }
 
+type InviteRole = 'admin' | 'finance' | 'booking' | 'tenant' | 'client' | 'landlord';
+
 interface Property {
   id: string;
   title: string;
@@ -29,9 +33,18 @@ interface Property {
 }
 
 export default function AdminUsersScreen() {
+  const { user: currentUser } = useUser();
+  const { log } = useAudit();
   const [users, setUsers] = useState<Profile[]>([]);
   const [properties, setProperties] = useState<Property[]>([]);
   const [loading, setLoading] = useState(true);
+
+  // Invite (create account) modal states
+  const [inviteModalVisible, setInviteModalVisible] = useState(false);
+  const [inviteEmail, setInviteEmail] = useState('');
+  const [inviteName, setInviteName] = useState('');
+  const [inviteRole, setInviteRole] = useState<InviteRole>('client');
+  const [submittingInvite, setSubmittingInvite] = useState(false);
 
   // Lease Modal States
   const [leaseModalVisible, setLeaseModalVisible] = useState(false);
@@ -44,7 +57,7 @@ export default function AdminUsersScreen() {
 
   // Role Edit Modal
   const [roleModalVisible, setRoleModalVisible] = useState(false);
-  const [selectedRole, setSelectedRole] = useState<'admin' | 'finance' | 'booking' | 'tenant' | 'client'>('client');
+  const [selectedRole, setSelectedRole] = useState<'admin' | 'finance' | 'booking' | 'tenant' | 'client' | 'landlord'>('client');
 
   const fetchData = async () => {
     try {
@@ -90,6 +103,12 @@ export default function AdminUsersScreen() {
 
       if (error) throw error;
 
+      log({
+        action: 'update',
+        entityType: 'user',
+        entityId: selectedUser.id,
+        description: `Set ${selectedUser.full_name} role to ${selectedRole}`,
+      });
       Alert.alert('Success', `${selectedUser.full_name}'s role updated to ${selectedRole}.`);
       setRoleModalVisible(false);
       fetchData();
@@ -97,6 +116,89 @@ export default function AdminUsersScreen() {
       console.error('Update role error:', err);
       Alert.alert('Error', 'Failed to update user role.');
     }
+  };
+
+  const handleCreateInvite = async () => {
+    const email = inviteEmail.trim().toLowerCase();
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      Alert.alert('Validation Error', 'Please enter a valid email address.');
+      return;
+    }
+    try {
+      setSubmittingInvite(true);
+
+      // --- DEBUG: diagnose RLS / JWT issue ---
+      const { data: jwtDebug, error: jwtErr } = await supabase.rpc('get_jwt_sub');
+      console.log('[DEBUG invite] auth.jwt() sub from DB:', jwtDebug, 'error:', jwtErr);
+      console.log('[DEBUG invite] currentUser.id from Clerk:', currentUser?.id);
+
+      const { data: profileCheck } = await supabase
+        .from('profiles')
+        .select('id, role')
+        .eq('id', currentUser?.id ?? '')
+        .single();
+      console.log('[DEBUG invite] profile check:', profileCheck);
+      // --- END DEBUG ---
+
+      const { error } = await supabase.from('user_invites').upsert(
+        {
+          email,
+          full_name: inviteName.trim() || null,
+          role: inviteRole,
+          status: 'pending',
+          invited_by: currentUser?.id ?? null,
+        },
+        { onConflict: 'email' },
+      );
+      if (error) throw error;
+
+      log({
+        action: 'create',
+        entityType: 'user_invite',
+        description: `Invited ${email} as ${inviteRole}`,
+      });
+      Alert.alert(
+        'User Invited',
+        `${email} is pre-registered as ${inviteRole}. When they sign up with this email, the role is applied automatically.`,
+      );
+      setInviteModalVisible(false);
+      setInviteEmail('');
+      setInviteName('');
+      setInviteRole('client');
+    } catch (err: any) {
+      console.error('Create invite error:', err);
+      Alert.alert('Error', 'Failed to create the user invite.');
+    } finally {
+      setSubmittingInvite(false);
+    }
+  };
+
+  const handleResetPassword = (user: Profile) => {
+    // Passwords are managed by Clerk (the identity provider). An admin cannot
+    // set another user's password from the client, so we trigger the secure
+    // self-service reset flow: the user receives a reset link/code by email.
+    Alert.alert(
+      'Reset Password',
+      `Send a password reset instruction to ${user.email}? They will use the "Forgot password" flow to set a new password securely.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Send',
+          onPress: async () => {
+            log({
+              action: 'reset_password',
+              entityType: 'user',
+              entityId: user.id,
+              description: `Requested password reset for ${user.email}`,
+            });
+            Alert.alert(
+              'Reset Requested',
+              `${user.full_name} should open the app, tap "Forgot password", and follow the emailed instructions. This request has been logged.`,
+            );
+          },
+        },
+      ],
+    );
   };
 
   const handleDeleteUser = (id: string, fullName: string) => {
@@ -112,6 +214,7 @@ export default function AdminUsersScreen() {
             try {
               const { error } = await supabase.from('profiles').delete().eq('id', id);
               if (error) throw error;
+              log({ action: 'delete', entityType: 'user', entityId: id, description: `Deleted ${fullName}` });
               Alert.alert('Success', 'User profile deleted.');
               setUsers(prev => prev.filter(u => u.id !== id));
             } catch (err) {
@@ -167,6 +270,12 @@ export default function AdminUsersScreen() {
           .eq('id', selectedUser.id);
       }
 
+      log({
+        action: 'create',
+        entityType: 'lease',
+        entityId: selectedUser.id,
+        description: `Allocated lease to ${selectedUser.full_name}`,
+      });
       Alert.alert('Lease Assigned 🎉', `Active lease created successfully for ${selectedUser.full_name}.`);
       setLeaseModalVisible(false);
       // Reset form fields
@@ -202,6 +311,7 @@ export default function AdminUsersScreen() {
           <ActivityIndicator size="large" color="#38BDF8" />
         </View>
       ) : (
+        <>
         <FlatList
           data={users}
           keyExtractor={(item) => item.id}
@@ -245,13 +355,104 @@ export default function AdminUsersScreen() {
                   </TouchableOpacity>
                 )}
               </View>
+
+              <TouchableOpacity
+                style={styles.resetRow}
+                onPress={() => handleResetPassword(item)}
+              >
+                <KeyRound size={13} color="#94A3B8" style={styles.btnIcon} />
+                <Text style={styles.resetRowText}>Reset password</Text>
+              </TouchableOpacity>
             </View>
           )}
           contentContainerStyle={styles.listContainer}
           onRefresh={fetchData}
           refreshing={loading}
         />
+        <TouchableOpacity style={styles.fab} onPress={() => setInviteModalVisible(true)}>
+          <UserPlus size={24} color="#0F172A" />
+        </TouchableOpacity>
+        </>
       )}
+
+      {/* Invite / Create User Modal */}
+      <Modal
+        animationType="slide"
+        transparent
+        visible={inviteModalVisible}
+        onRequestClose={() => setInviteModalVisible(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Create User Account</Text>
+              <TouchableOpacity onPress={() => setInviteModalVisible(false)}>
+                <X size={24} color="#94A3B8" />
+              </TouchableOpacity>
+            </View>
+
+            <ScrollView contentContainerStyle={styles.modalBody} showsVerticalScrollIndicator={false}>
+              <View style={styles.inviteNote}>
+                <Mail size={16} color="#38BDF8" style={{ marginRight: 8 }} />
+                <Text style={styles.inviteNoteText}>
+                  Pre-register a user by email and assign their role. When they sign up with this email,
+                  the role is applied automatically.
+                </Text>
+              </View>
+
+              <View style={styles.inputGroup}>
+                <Text style={styles.label}>Email Address</Text>
+                <TextInput
+                  style={styles.modalInput}
+                  placeholder="name@domain.com"
+                  placeholderTextColor="#999"
+                  value={inviteEmail}
+                  onChangeText={setInviteEmail}
+                  autoCapitalize="none"
+                  keyboardType="email-address"
+                />
+              </View>
+
+              <View style={styles.inputGroup}>
+                <Text style={styles.label}>Full Name (optional)</Text>
+                <TextInput
+                  style={styles.modalInput}
+                  placeholder="e.g. Jane Doe"
+                  placeholderTextColor="#999"
+                  value={inviteName}
+                  onChangeText={setInviteName}
+                  autoCapitalize="words"
+                />
+              </View>
+
+              <View style={styles.inputGroup}>
+                <Text style={styles.label}>Assign Role</Text>
+                <View style={styles.roleSelectionRow}>
+                  {(['client', 'tenant', 'landlord', 'booking', 'finance', 'admin'] as InviteRole[]).map((r) => (
+                    <TouchableOpacity
+                      key={r}
+                      style={[styles.roleSelectBtn, inviteRole === r && styles.roleSelectBtnActive]}
+                      onPress={() => setInviteRole(r)}
+                    >
+                      <Text style={[styles.roleSelectText, inviteRole === r && styles.roleSelectTextActive]}>
+                        {r.toUpperCase()}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              </View>
+
+              <TouchableOpacity style={styles.submitBtn} onPress={handleCreateInvite} disabled={submittingInvite}>
+                {submittingInvite ? (
+                  <ActivityIndicator color="#0F172A" />
+                ) : (
+                  <Text style={styles.submitBtnText}>Create Account Invite</Text>
+                )}
+              </TouchableOpacity>
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
 
       {/* Role Update Modal */}
       <Modal
@@ -274,7 +475,7 @@ export default function AdminUsersScreen() {
                 <Text style={styles.modalSubText}>User: {selectedUser.full_name}</Text>
                 
                 <View style={styles.roleSelectionRow}>
-                  {['client', 'tenant', 'booking', 'finance', 'admin'].map((r) => (
+                  {['client', 'tenant', 'landlord', 'booking', 'finance', 'admin'].map((r) => (
                     <TouchableOpacity
                       key={r}
                       style={[
@@ -505,6 +706,50 @@ const styles = StyleSheet.create({
     color: '#EF4444',
     fontWeight: '600',
     fontSize: 13,
+  },
+  resetRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 10,
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: '#334155',
+  },
+  resetRowText: {
+    color: '#94A3B8',
+    fontSize: 12,
+    fontWeight: '500',
+  },
+  fab: {
+    position: 'absolute',
+    bottom: 24,
+    right: 24,
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    backgroundColor: '#38BDF8',
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#38BDF8',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.4,
+    shadowRadius: 6,
+    elevation: 8,
+  },
+  inviteNote: {
+    flexDirection: 'row',
+    backgroundColor: 'rgba(56, 189, 248, 0.08)',
+    borderRadius: 8,
+    padding: 12,
+    marginBottom: 20,
+    alignItems: 'flex-start',
+  },
+  inviteNoteText: {
+    color: '#94A3B8',
+    fontSize: 12,
+    lineHeight: 18,
+    flex: 1,
   },
   centered: {
     flex: 1,

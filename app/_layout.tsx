@@ -1,3 +1,4 @@
+import 'react-native-gesture-handler';
 import { useFonts } from 'expo-font';
 import { Stack, useRouter, useSegments, useRootNavigationState } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
@@ -6,12 +7,16 @@ import { View, ActivityIndicator, StyleSheet } from 'react-native';
 import { ClerkProvider, useAuth } from '@clerk/clerk-expo';
 import { tokenCache } from '../lib/clerk';
 import { useRole } from '../hooks/useRole';
-import { setSupabaseToken } from '../lib/supabase';
+import { setSupabaseToken, setSupabaseTokenGetter } from '../lib/supabase';
 import 'react-native-reanimated';
 
 export {
   ErrorBoundary,
 } from 'expo-router';
+
+// #region agent log
+console.log('[DEBUG d1d833] _layout module loaded (JS bundle executing on device)');
+// #endregion
 
 // Prevent the splash screen from auto-hiding before asset loading is complete.
 SplashScreen.preventAutoHideAsync();
@@ -25,33 +30,31 @@ function InitialLayout() {
   const router = useRouter();
   const navigationState = useRootNavigationState();
 
-  // Sync token to Supabase client when authentication status changes
-  const tokenSyncedRef = useRef(false);
+  // Register a dynamic token getter so every Supabase request uses a fresh
+  // Clerk JWT. Clerk caches valid tokens and only refetches near expiry, which
+  // prevents "JWT expired" (PGRST303) errors from a stale cached token.
+  const getTokenRef = useRef(getToken);
+  getTokenRef.current = getToken;
   useEffect(() => {
-    // useRole already handles token sync, so this is just a backup
     if (!isAuthLoaded) return;
 
-    async function syncToken() {
-      if (isSignedIn && !tokenSyncedRef.current) {
-        tokenSyncedRef.current = true;
+    if (isSignedIn) {
+      setSupabaseTokenGetter(async () => {
         try {
-          const token = await getToken({ template: 'supabase' });
-          setSupabaseToken(token);
+          return await getTokenRef.current({ template: 'supabase' });
         } catch {
-          // Template doesn't exist — use default Clerk session token
+          // Template doesn't exist — fall back to default Clerk session token
           try {
-            const token = await getToken();
-            setSupabaseToken(token);
+            return await getTokenRef.current();
           } catch {
-            // Token fetch failed — useRole will handle it
+            return null;
           }
         }
-      } else if (!isSignedIn) {
-        tokenSyncedRef.current = false;
-        setSupabaseToken(null);
-      }
+      });
+    } else {
+      setSupabaseTokenGetter(null);
+      setSupabaseToken(null);
     }
-    syncToken();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isSignedIn, isAuthLoaded]);
 
@@ -92,6 +95,7 @@ function InitialLayout() {
           booking: '(booking)',
           tenant: '(tenant)',
           client: '(client)',
+          landlord: '(landlord)',
         };
 
         const expectedGroup = roleGroups[role];
@@ -105,6 +109,8 @@ function InitialLayout() {
             router.replace('/(booking)/dashboard');
           } else if (role === 'tenant') {
             router.replace('/(tenant)/dashboard');
+          } else if (role === 'landlord') {
+            router.replace('/(landlord)/dashboard');
           } else {
             router.replace('/(client)/properties');
           }
@@ -132,6 +138,7 @@ function InitialLayout() {
       <Stack.Screen name="(tenant)" />
       <Stack.Screen name="(booking)" />
       <Stack.Screen name="(client)" />
+      <Stack.Screen name="(landlord)" />
       <Stack.Screen name="modal" options={{ presentation: 'modal' }} />
       <Stack.Screen name="+not-found" options={{ headerShown: true }} />
     </Stack>
@@ -142,6 +149,10 @@ export default function RootLayout() {
   const [loaded, error] = useFonts({
     SpaceMono: require('../assets/fonts/SpaceMono-Regular.ttf'),
   });
+
+  // #region agent log
+  console.log('[DEBUG d1d833] RootLayout render', { fontLoaded: loaded, fontError: !!error, hasClerkKey: !!CLERK_PUBLISHABLE_KEY });
+  // #endregion
 
   useEffect(() => {
     if (error) throw error;

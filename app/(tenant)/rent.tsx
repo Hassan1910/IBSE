@@ -13,6 +13,7 @@ import {
 } from 'react-native';
 import { supabase } from '../../lib/supabase';
 import { useUser } from '@clerk/clerk-expo';
+import { useAudit } from '../../hooks/useAudit';
 import { CreditCard, DollarSign, Key, Send } from 'lucide-react-native';
 
 const PAYMENT_METHODS = [
@@ -23,6 +24,7 @@ const PAYMENT_METHODS = [
 
 export default function RentPaymentScreen() {
   const { user } = useUser();
+  const { log } = useAudit();
   const [activeLease, setActiveLease] = useState<any>(null);
   const [loadingLease, setLoadingLease] = useState(true);
 
@@ -80,14 +82,18 @@ export default function RentPaymentScreen() {
 
     try {
       setSubmitting(true);
-      const { error } = await supabase.from('payments').insert({
+      const { data, error } = await supabase
+        .from('payments')
+        .insert({
         lease_id: activeLease.id,
         payer_id: user.id,
         amount: parseFloat(amount),
         payment_method: paymentMethod,
         reference_code: refCode.trim().toUpperCase(),
         status: 'pending',
-      });
+      })
+        .select('id')
+        .single();
 
       if (error) {
         if (error.code === '23505') {
@@ -95,6 +101,13 @@ export default function RentPaymentScreen() {
         }
         throw error;
       }
+
+      await log({
+        action: 'create',
+        entityType: 'payment',
+        entityId: data?.id,
+        description: 'Tenant submitted rent payment reference.',
+      });
 
       Alert.alert(
         'Submission Received 🎉',

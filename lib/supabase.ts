@@ -1,1 +1,1 @@
-export { supabase, setSupabaseToken } from '../utils/supabase';
+export { supabase, setSupabaseToken, setSupabaseTokenGetter } from '../utils/supabase';

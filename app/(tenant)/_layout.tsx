@@ -1,7 +1,10 @@
 import { Tabs } from 'expo-router';
 import { Home, CreditCard, Wrench, User } from 'lucide-react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 export default function TenantLayout() {
+  const insets = useSafeAreaInsets();
+
   return (
     <Tabs
       screenOptions={{
@@ -10,9 +13,9 @@ export default function TenantLayout() {
         tabBarStyle: {
           backgroundColor: '#1E293B',
           borderTopColor: '#334155',
-          paddingBottom: 8,
+          paddingBottom: insets.bottom + 8,
           paddingTop: 8,
-          height: 65,
+          height: 65 + insets.bottom,
         },
         headerStyle: {
           backgroundColor: '#1E293B',
@@ -58,6 +61,11 @@ export default function TenantLayout() {
           tabBarIcon: ({ color, size }) => <User color={color} size={size} />,
         }}
       />
+      <Tabs.Screen name="agreements" options={{ href: null, title: 'My Agreement' }} />
+      <Tabs.Screen name="documents" options={{ href: null, title: 'My Documents' }} />
+      <Tabs.Screen name="feedback" options={{ href: null, title: 'Feedback & Complaints' }} />
+      <Tabs.Screen name="notifications" options={{ href: null, title: 'Notifications' }} />
+      <Tabs.Screen name="help" options={{ href: null, title: 'Help & Guides' }} />
     </Tabs>
   );
 }

@@ -9,13 +9,13 @@ import {
 } from 'react-native';
 import { supabase } from '../../lib/supabase';
 import { useUser } from '@clerk/clerk-expo';
-import { Calendar, Clock, HelpCircle, CheckCircle, XCircle } from 'lucide-react-native';
+import { Calendar, Clock, HelpCircle, CheckCircle, XCircle, CheckCheck } from 'lucide-react-native';
 
 interface Booking {
   id: string;
   booking_date: string;
   type: 'viewing' | 'reservation';
-  status: 'pending' | 'approved' | 'declined';
+  status: 'pending' | 'approved' | 'declined' | 'completed' | 'cancelled';
   notes: string;
   properties: {
     title: string;
@@ -92,6 +92,20 @@ export default function MyBookingsScreen() {
           <View style={[styles.statusBadge, styles.statusDeclined]}>
             <XCircle size={14} color="#EF4444" style={styles.badgeIcon} />
             <Text style={[styles.statusText, styles.textDeclined]}>Declined</Text>
+          </View>
+        );
+      case 'completed':
+        return (
+          <View style={[styles.statusBadge, styles.statusCompleted]}>
+            <CheckCheck size={14} color="#38BDF8" style={styles.badgeIcon} />
+            <Text style={[styles.statusText, styles.textCompleted]}>Completed</Text>
+          </View>
+        );
+      case 'cancelled':
+        return (
+          <View style={[styles.statusBadge, styles.statusCancelled]}>
+            <XCircle size={14} color="#94A3B8" style={styles.badgeIcon} />
+            <Text style={[styles.statusText, styles.textCancelled]}>Cancelled</Text>
           </View>
         );
       default:
@@ -238,6 +252,12 @@ const styles = StyleSheet.create({
   statusDeclined: {
     backgroundColor: 'rgba(239, 68, 68, 0.15)',
   },
+  statusCompleted: {
+    backgroundColor: 'rgba(56, 189, 248, 0.15)',
+  },
+  statusCancelled: {
+    backgroundColor: 'rgba(148, 163, 184, 0.15)',
+  },
   badgeIcon: {
     marginRight: 4,
   },
@@ -253,6 +273,12 @@ const styles = StyleSheet.create({
   },
   textDeclined: {
     color: '#EF4444',
+  },
+  textCompleted: {
+    color: '#38BDF8',
+  },
+  textCancelled: {
+    color: '#94A3B8',
   },
   centered: {
     flex: 1,

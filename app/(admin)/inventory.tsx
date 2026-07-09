@@ -11,7 +11,7 @@ import {
   Alert,
 } from 'react-native';
 import { supabase } from '../../lib/supabase';
-import { Plus, Minus, X, Package, ShieldAlert, Edit2, Trash2 } from 'lucide-react-native';
+import { Plus, Minus, X, Package, ShieldAlert, Edit2, Trash2, History } from 'lucide-react-native';
 
 interface InventoryItem {
   id: string;
@@ -19,6 +19,15 @@ interface InventoryItem {
   quantity: number;
   unit: string;
   status: 'in_stock' | 'low_stock' | 'out_of_stock';
+}
+
+interface UsageRecord {
+  id: string;
+  quantity_used: number;
+  notes: string | null;
+  created_at: string;
+  maintenance_requests: { title: string } | null;
+  profiles: { full_name: string } | null;
 }
 
 export default function AdminInventoryScreen() {
@@ -32,6 +41,11 @@ export default function AdminInventoryScreen() {
   const [unit, setUnit] = useState('pcs');
   const [submitting, setSubmitting] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
+
+  // Usage history modal state
+  const [historyItem, setHistoryItem] = useState<InventoryItem | null>(null);
+  const [usages, setUsages] = useState<UsageRecord[]>([]);
+  const [loadingUsages, setLoadingUsages] = useState(false);
 
   const resetForm = () => {
     setEditingId(null);
@@ -67,6 +81,26 @@ export default function AdminInventoryScreen() {
         }
       }
     ]);
+  };
+
+  const openHistory = async (item: InventoryItem) => {
+    setHistoryItem(item);
+    try {
+      setLoadingUsages(true);
+      const { data, error } = await supabase
+        .from('inventory_usages')
+        .select('id, quantity_used, notes, created_at, maintenance_requests ( title ), profiles:used_by ( full_name )')
+        .eq('inventory_id', item.id)
+        .order('created_at', { ascending: false })
+        .limit(50);
+      if (error) throw error;
+      setUsages((data as any) || []);
+    } catch (err) {
+      console.error('Fetch usage history error:', err);
+      Alert.alert('Error', 'Failed to load usage history.');
+    } finally {
+      setLoadingUsages(false);
+    }
   };
 
   const fetchInventory = async () => {
@@ -213,6 +247,9 @@ export default function AdminInventoryScreen() {
                 </View>
 
                 <View style={styles.actionGrid}>
+                  <TouchableOpacity style={styles.actionBtn} onPress={() => openHistory(item)}>
+                    <History size={16} color="#38BDF8" />
+                  </TouchableOpacity>
                   <TouchableOpacity style={styles.actionBtn} onPress={() => handleEdit(item)}>
                     <Edit2 size={16} color="#38BDF8" />
                   </TouchableOpacity>
@@ -320,6 +357,62 @@ export default function AdminInventoryScreen() {
                 )}
               </TouchableOpacity>
             </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Usage History Modal */}
+      <Modal
+        animationType="slide"
+        transparent={true}
+        visible={!!historyItem}
+        onRequestClose={() => setHistoryItem(null)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalContent, styles.historyModal]}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Usage History — {historyItem?.item_name}</Text>
+              <TouchableOpacity onPress={() => setHistoryItem(null)}>
+                <X size={24} color="#94A3B8" />
+              </TouchableOpacity>
+            </View>
+
+            {loadingUsages ? (
+              <ActivityIndicator size="large" color="#38BDF8" style={styles.historyLoading} />
+            ) : usages.length === 0 ? (
+              <View style={styles.historyEmpty}>
+                <Package size={32} color="#94A3B8" />
+                <Text style={styles.emptyText}>No recorded usage for this item yet.</Text>
+              </View>
+            ) : (
+              <FlatList
+                data={usages}
+                keyExtractor={(u) => u.id}
+                renderItem={({ item: usage }) => (
+                  <View style={styles.usageRow}>
+                    <View style={styles.usageInfo}>
+                      <Text style={styles.usageQty}>
+                        -{usage.quantity_used} {historyItem?.unit}
+                      </Text>
+                      <Text style={styles.usageMeta}>
+                        {usage.maintenance_requests?.title
+                          ? `Maintenance: ${usage.maintenance_requests.title}`
+                          : 'General usage'}
+                      </Text>
+                      <Text style={styles.usageMeta}>
+                        By {usage.profiles?.full_name || 'Unknown'} on{' '}
+                        {new Date(usage.created_at).toLocaleDateString('en-KE', {
+                          year: 'numeric',
+                          month: 'short',
+                          day: 'numeric',
+                        })}
+                      </Text>
+                      {usage.notes ? <Text style={styles.usageNotes}>"{usage.notes}"</Text> : null}
+                    </View>
+                  </View>
+                )}
+              />
+            )}
           </View>
         </View>
       </Modal>
@@ -501,5 +594,44 @@ const styles = StyleSheet.create({
     color: '#0F172A',
     fontWeight: 'bold',
     fontSize: 16,
+  },
+  historyModal: {
+    maxHeight: '75%',
+  },
+  historyLoading: {
+    marginVertical: 30,
+  },
+  historyEmpty: {
+    alignItems: 'center',
+    paddingVertical: 30,
+    gap: 10,
+  },
+  usageRow: {
+    backgroundColor: '#0F172A',
+    borderWidth: 1,
+    borderColor: '#334155',
+    borderRadius: 8,
+    padding: 12,
+    marginBottom: 10,
+  },
+  usageInfo: {
+    flex: 1,
+  },
+  usageQty: {
+    color: '#EF4444',
+    fontSize: 15,
+    fontWeight: 'bold',
+    marginBottom: 4,
+  },
+  usageMeta: {
+    color: '#94A3B8',
+    fontSize: 12,
+    marginBottom: 2,
+  },
+  usageNotes: {
+    color: '#94A3B8',
+    fontSize: 12,
+    fontStyle: 'italic',
+    marginTop: 4,
   },
 });

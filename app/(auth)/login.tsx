@@ -14,6 +14,52 @@ import {
 import { useSignIn, useAuth } from '@clerk/clerk-expo';
 import { useRouter } from 'expo-router';
 import { supabase, setSupabaseToken } from '../../lib/supabase';
+import { logAudit } from '../../lib/audit';
+import { resolveInvite, markInviteAccepted } from '../../lib/invites';
+
+// Designated administrator account. Only this email is auto-provisioned with the
+// admin role when no Supabase profile exists yet.
+const ADMIN_EMAIL = 'admin@ibsahomes.com';
+
+/**
+ * Ensures a Supabase profile exists for the signed-in user (applying any admin
+ * invite role), then records a 'login' audit entry. Safe to call on every login.
+ */
+async function provisionAndLogLogin(userId: string, email: string) {
+  try {
+    const { data: profile } = await supabase
+      .from('profiles')
+      .select('role')
+      .eq('id', userId)
+      .single();
+
+    let role = profile?.role as string | undefined;
+
+    if (!profile) {
+      const invite = await resolveInvite(email);
+      const isAdmin = email.trim().toLowerCase() === ADMIN_EMAIL;
+      role = invite?.role || (isAdmin ? 'admin' : 'client');
+      await supabase.from('profiles').insert({
+        id: userId,
+        full_name: invite?.fullName || (isAdmin ? 'IBSA Admin' : 'New User'),
+        email,
+        phone: '+254700000000',
+        role,
+      });
+      if (invite) await markInviteAccepted(invite.inviteId);
+    }
+
+    await logAudit({
+      actorId: userId,
+      actorEmail: email,
+      actorRole: role ?? null,
+      action: 'login',
+      description: 'User signed in',
+    });
+  } catch (profileError) {
+    console.error('[Login] Profile sync / audit error:', profileError);
+  }
+}
 
 function decodeClerkToken(token: string): string | null {
   try {
@@ -76,6 +122,10 @@ export default function LoginScreen() {
   const { getToken, isSignedIn, signOut } = useAuth();
   const router = useRouter();
 
+  // #region agent log
+  console.log('[DEBUG d1d833] LoginScreen render', { clerkSignInLoaded: isLoaded });
+  // #endregion
+
   const [emailAddress, setEmailAddress] = React.useState('');
   const [password, setPassword] = React.useState('');
   const [pendingVerification, setPendingVerification] = React.useState(false);
@@ -123,26 +173,7 @@ export default function LoginScreen() {
           
           const userId = decodeClerkToken(sessionToken);
           if (userId) {
-            try {
-              const { data: profile } = await supabase
-                .from('profiles')
-                .select('role')
-                .eq('id', userId)
-                .single();
-                
-              if (!profile) {
-                console.log('Syncing newly logged in admin profile to Supabase database...');
-                await supabase.from('profiles').insert({
-                  id: userId,
-                  full_name: 'Admin User',
-                  email: emailAddress,
-                  phone: '+254700000000',
-                  role: 'admin',
-                });
-              }
-            } catch (profileError) {
-              console.error('[Login] Profile sync error:', profileError);
-            }
+            await provisionAndLogLogin(userId, emailAddress);
           } else {
             console.error('[Login] Failed to extract user ID from Supabase token');
           }
@@ -196,27 +227,7 @@ export default function LoginScreen() {
           
           const userId = decodeClerkToken(sessionToken);
           if (userId) {
-            // Auto-create profile if missing in Supabase database
-            try {
-              const { data: profile } = await supabase
-                .from('profiles')
-                .select('role')
-                .eq('id', userId)
-                .single();
-                
-              if (!profile) {
-                console.log('Syncing newly logged in admin profile to Supabase database...');
-                await supabase.from('profiles').insert({
-                  id: userId,
-                  full_name: 'Admin User',
-                  email: emailAddress,
-                  phone: '+254700000000',
-                  role: 'admin',
-                });
-              }
-            } catch (profileError) {
-              console.error('[Login] Profile sync error:', profileError);
-            }
+            await provisionAndLogLogin(userId, emailAddress);
           } else {
             console.error('[Login] Failed to extract user ID from Supabase token');
           }
