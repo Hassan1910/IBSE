@@ -2,6 +2,7 @@ import React from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Alert } from 'react-native';
 import { useUser, useAuth } from '@clerk/clerk-expo';
 import { LogOut, User, Mail, Phone } from 'lucide-react-native';
+import ChangePasswordCard from '../../components/ChangePasswordCard';
 
 export default function ClientProfile() {
   const { user } = useUser();
@@ -45,6 +46,8 @@ export default function ClientProfile() {
           </View>
         </View>
       </View>
+
+      <ChangePasswordCard />
 
       <TouchableOpacity style={styles.logoutBtn} onPress={handleSignOut}>
         <LogOut size={20} color="#EF4444" style={styles.logoutIcon} />

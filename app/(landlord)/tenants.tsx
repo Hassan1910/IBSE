@@ -47,12 +47,13 @@ export default function LandlordTenants() {
   const [submittingInvite, setSubmittingInvite] = useState(false);
 
   const fetchTenants = useCallback(async () => {
+    if (!user?.id) return;
     try {
       setLoading(true);
-      // RLS returns only leases owned by this landlord.
       const { data, error } = await supabase
         .from('leases')
         .select('id, tenant_id, start_date, end_date, rent_amount, status, properties ( title ), profiles:tenant_id ( full_name, email, phone )')
+        .eq('owner_id', user.id)
         .order('start_date', { ascending: false });
 
       if (error) throw error;
@@ -82,7 +83,7 @@ export default function LandlordTenants() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [user?.id]);
 
   useEffect(() => {
     fetchTenants();

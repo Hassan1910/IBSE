@@ -48,12 +48,13 @@ export default function LandlordMaintenance() {
   const [materialsRequest, setMaterialsRequest] = useState<MaintenanceRequest | null>(null);
 
   const fetchRequests = useCallback(async () => {
+    if (!user?.id) return;
     try {
       setLoading(true);
-      // RLS returns only requests on properties owned by this landlord.
       const { data, error } = await supabase
         .from('maintenance_requests')
-        .select('id, tenant_id, title, description, priority, status, created_at, assigned_to, expense_amount, properties ( title ), profiles:tenant_id ( full_name )')
+        .select('id, tenant_id, title, description, priority, status, created_at, assigned_to, expense_amount, properties!inner ( title, owner_id ), profiles:tenant_id ( full_name )')
+        .eq('properties.owner_id', user.id)
         .order('created_at', { ascending: false });
       if (error) throw error;
       setRequests((data as any) || []);
@@ -63,7 +64,7 @@ export default function LandlordMaintenance() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [user?.id]);
 
   useEffect(() => {
     fetchRequests();

@@ -15,7 +15,7 @@ import {
 import { useUser } from '@clerk/clerk-expo';
 import { supabase } from '../../lib/supabase';
 import { pickImages, uploadImage } from '../../lib/storage';
-import { Plus, X, MapPin, Tag, Landmark, Edit2, Trash2, Camera } from 'lucide-react-native';
+import { Plus, X, MapPin, Tag, Landmark, Edit2, Trash2, Camera, User } from 'lucide-react-native';
 
 interface Property {
   id: string;
@@ -27,12 +27,16 @@ interface Property {
   location: string;
   status: 'available' | 'rented' | 'sold';
   image_urls: string[] | null;
+  owner_id?: string | null;
+  profiles?: { full_name: string } | null;
 }
 
 export default function AdminPropertiesScreen() {
   const { user } = useUser();
   const [properties, setProperties] = useState<Property[]>([]);
   const [loading, setLoading] = useState(true);
+  const [landlords, setLandlords] = useState<{ id: string; full_name: string; email: string }[]>([]);
+  const [selectedLandlordId, setSelectedLandlordId] = useState<string | null>(null);
 
   const [modalVisible, setModalVisible] = useState(false);
   const [title, setTitle] = useState('');
@@ -54,6 +58,7 @@ export default function AdminPropertiesScreen() {
     setSelectedImages([]);
     setType('rental');
     setCategory('residential');
+    setSelectedLandlordId(null);
   };
 
   const handleEdit = (property: Property) => {
@@ -65,6 +70,7 @@ export default function AdminPropertiesScreen() {
     setPrice(property.price.toString());
     setLocation(property.location);
     setSelectedImages(property.image_urls || []);
+    setSelectedLandlordId(property.owner_id || null);
     setModalVisible(true);
   };
 
@@ -104,12 +110,26 @@ export default function AdminPropertiesScreen() {
     setSelectedImages((prev) => prev.filter((_, i) => i !== index));
   };
 
+  const fetchLandlords = async () => {
+    try {
+      const { data, error } = await supabase
+        .from('profiles')
+        .select('id, full_name, email')
+        .eq('role', 'landlord')
+        .order('full_name', { ascending: true });
+      if (error) throw error;
+      setLandlords(data || []);
+    } catch (err) {
+      console.error('Fetch landlords error:', err);
+    }
+  };
+
   const fetchProperties = async () => {
     try {
       setLoading(true);
       const { data, error } = await supabase
         .from('properties')
-        .select('*')
+        .select('*, profiles:owner_id ( full_name )')
         .order('created_at', { ascending: false });
 
       if (error) throw error;
@@ -124,6 +144,7 @@ export default function AdminPropertiesScreen() {
 
   useEffect(() => {
     fetchProperties();
+    fetchLandlords();
   }, []);
 
   const handleSubmit = async () => {
@@ -170,6 +191,7 @@ export default function AdminPropertiesScreen() {
             price: numPrice,
             location: location.trim(),
             image_urls: uploadedUrls,
+            owner_id: selectedLandlordId,
           })
           .eq('id', editingId);
 
@@ -185,6 +207,7 @@ export default function AdminPropertiesScreen() {
           location: location.trim(),
           status: 'available',
           image_urls: uploadedUrls,
+          owner_id: selectedLandlordId,
         });
 
         if (error) throw error;
@@ -249,6 +272,13 @@ export default function AdminPropertiesScreen() {
                   <Tag size={14} color="#38BDF8" style={styles.icon} />
                   <Text style={styles.infoText}>
                     {item.category.toUpperCase()} • {item.type.toUpperCase()}
+                  </Text>
+                </View>
+
+                <View style={styles.infoRow}>
+                  <User size={14} color="#38BDF8" style={styles.icon} />
+                  <Text style={styles.infoText}>
+                    Owner: {item.profiles?.full_name || 'Agency Owned'}
                   </Text>
                 </View>
 
@@ -393,6 +423,47 @@ export default function AdminPropertiesScreen() {
                   value={location}
                   onChangeText={setLocation}
                 />
+              </View>
+
+              <View style={styles.inputGroup}>
+                <Text style={styles.label}>Select Owner (Landlord)</Text>
+                <View style={styles.ownerGrid}>
+                  <TouchableOpacity
+                    style={[
+                      styles.ownerBtn,
+                      selectedLandlordId === null && styles.ownerBtnActive,
+                    ]}
+                    onPress={() => setSelectedLandlordId(null)}
+                  >
+                    <Text
+                      style={[
+                        styles.ownerText,
+                        selectedLandlordId === null && styles.ownerTextActive,
+                      ]}
+                    >
+                      Agency Owned (No Landlord)
+                    </Text>
+                  </TouchableOpacity>
+                  {landlords.map((l) => (
+                    <TouchableOpacity
+                      key={l.id}
+                      style={[
+                        styles.ownerBtn,
+                        selectedLandlordId === l.id && styles.ownerBtnActive,
+                      ]}
+                      onPress={() => setSelectedLandlordId(l.id)}
+                    >
+                      <Text
+                        style={[
+                          styles.ownerText,
+                          selectedLandlordId === l.id && styles.ownerTextActive,
+                        ]}
+                      >
+                        {l.full_name} ({l.email})
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
               </View>
 
               {/* Image Picker */}
@@ -729,5 +800,28 @@ const styles = StyleSheet.create({
     color: '#0F172A',
     fontWeight: 'bold',
     fontSize: 16,
+  },
+  ownerGrid: {
+    marginVertical: 4,
+  },
+  ownerBtn: {
+    backgroundColor: '#0F172A',
+    borderWidth: 1,
+    borderColor: '#334155',
+    borderRadius: 8,
+    padding: 12,
+    marginBottom: 8,
+  },
+  ownerBtnActive: {
+    borderColor: '#38BDF8',
+    backgroundColor: 'rgba(56, 189, 248, 0.1)',
+  },
+  ownerText: {
+    color: '#94A3B8',
+    fontSize: 13,
+  },
+  ownerTextActive: {
+    color: '#38BDF8',
+    fontWeight: 'bold',
   },
 });

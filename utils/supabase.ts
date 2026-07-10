@@ -49,15 +49,20 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
       if (tokenGetter) {
         try {
           const fresh = await tokenGetter();
+          console.log('[DEBUG FETCH] tokenGetter returned:', fresh ? `${fresh.substring(0, 15)}...` : 'null/undefined');
           if (fresh) {
             token = fresh;
             currentClerkToken = fresh;
           }
-        } catch {
+        } catch (err: any) {
+          console.error('[DEBUG FETCH] tokenGetter threw error:', err.message || err);
           // Fall back to the last known token if refresh fails.
         }
+      } else {
+        console.log('[DEBUG FETCH] tokenGetter is not set');
       }
 
+      console.log('[DEBUG FETCH] sending token:', token ? `${token.substring(0, 15)}...` : 'null/undefined');
       if (token) {
         headers.set('Authorization', `Bearer ${token}`);
       }

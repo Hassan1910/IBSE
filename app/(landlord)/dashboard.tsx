@@ -9,6 +9,7 @@ import {
   TouchableOpacity,
 } from 'react-native';
 import { useRouter } from 'expo-router';
+import { useUser } from '@clerk/clerk-expo';
 import { supabase } from '../../lib/supabase';
 import {
   Home,
@@ -40,6 +41,7 @@ interface RecentRequest {
 
 export default function LandlordDashboard() {
   const router = useRouter();
+  const { user } = useUser();
   const [loading, setLoading] = useState(true);
   const [stats, setStats] = useState({
     totalProperties: 0,
@@ -53,18 +55,57 @@ export default function LandlordDashboard() {
   const [recentRequests, setRecentRequests] = useState<RecentRequest[]>([]);
 
   const fetchData = useCallback(async () => {
+    if (!user?.id) return;
     try {
       setLoading(true);
 
-      // RLS automatically scopes every query below to the signed-in landlord.
+      // Auto-heal/backfill leases where owner_id is null by setting it to their property's owner_id
+      const { data: orphanLeases } = await supabase
+        .from('leases')
+        .select('id, properties(owner_id)')
+        .is('owner_id', null);
+
+      if (orphanLeases && orphanLeases.length > 0) {
+        for (const lease of orphanLeases) {
+          const propOwnerId = (lease.properties as any)?.owner_id;
+          if (propOwnerId) {
+            await supabase
+              .from('leases')
+              .update({ owner_id: propOwnerId })
+              .eq('id', lease.id);
+          }
+        }
+      }
+
+      // Auto-heal/backfill units where owner_id is null by setting it to their property's owner_id
+      const { data: orphanUnits } = await supabase
+        .from('units')
+        .select('id, properties(owner_id)')
+        .is('owner_id', null);
+
+      if (orphanUnits && orphanUnits.length > 0) {
+        for (const unit of orphanUnits) {
+          const propOwnerId = (unit.properties as any)?.owner_id;
+          if (propOwnerId) {
+            await supabase
+              .from('units')
+              .update({ owner_id: propOwnerId })
+              .eq('id', unit.id);
+          }
+        }
+      }
 
       // Properties owned
       const { count: propCount } = await supabase
         .from('properties')
-        .select('*', { count: 'exact', head: true });
+        .select('*', { count: 'exact', head: true })
+        .eq('owner_id', user.id);
 
       // Units (occupied vs vacant)
-      const { data: units } = await supabase.from('units').select('status');
+      const { data: units } = await supabase
+        .from('units')
+        .select('status')
+        .eq('owner_id', user.id);
       const occupiedUnits = units?.filter((u) => u.status === 'occupied').length || 0;
       const vacantUnits = units?.filter((u) => u.status === 'vacant').length || 0;
 
@@ -72,15 +113,17 @@ export default function LandlordDashboard() {
       const { data: leases } = await supabase
         .from('leases')
         .select('tenant_id, rent_amount')
-        .eq('status', 'active');
+        .eq('status', 'active')
+        .eq('owner_id', user.id);
       const tenantSet = new Set((leases || []).map((l) => l.tenant_id));
       const monthlyIncome = (leases || []).reduce((acc, l) => acc + Number(l.rent_amount || 0), 0);
 
-      // Pending payments (scoped through the landlord's leases via RLS)
+      // Pending payments (scoped through the landlord's leases)
       const { data: pending } = await supabase
         .from('payments')
-        .select('amount')
-        .eq('status', 'pending');
+        .select('amount, leases!inner(owner_id)')
+        .eq('status', 'pending')
+        .eq('leases.owner_id', user.id);
       const pendingTotal = (pending || []).reduce((acc, p) => acc + Number(p.amount || 0), 0);
 
       setStats({
@@ -95,14 +138,16 @@ export default function LandlordDashboard() {
       // Recent activity
       const { data: pay } = await supabase
         .from('payments')
-        .select('id, amount, status, payment_date, profiles ( full_name )')
+        .select('id, amount, status, payment_date, leases!inner(owner_id), profiles ( full_name )')
+        .eq('leases.owner_id', user.id)
         .order('payment_date', { ascending: false })
         .limit(5);
       setRecentPayments((pay as any) || []);
 
       const { data: reqs } = await supabase
         .from('maintenance_requests')
-        .select('id, title, status, created_at, properties ( title )')
+        .select('id, title, status, created_at, properties!inner ( title, owner_id )')
+        .eq('properties.owner_id', user.id)
         .order('created_at', { ascending: false })
         .limit(5);
       setRecentRequests((reqs as any) || []);
@@ -111,7 +156,7 @@ export default function LandlordDashboard() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [user?.id]);
 
   useEffect(() => {
     fetchData();

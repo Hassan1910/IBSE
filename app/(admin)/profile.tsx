@@ -4,6 +4,7 @@ import { useUser, useAuth } from '@clerk/clerk-expo';
 import { LogOut, User, Mail, Phone } from 'lucide-react-native';
 import { useRole } from '../../hooks/useRole';
 import { adminTheme } from '../../constants/adminTheme';
+import ChangePasswordCard from '../../components/ChangePasswordCard';
 
 export default function AdminProfile() {
   const { user } = useUser();
@@ -49,6 +50,8 @@ export default function AdminProfile() {
           </View>
         </View>
       </View>
+
+      <ChangePasswordCard />
 
       <TouchableOpacity style={styles.logoutBtn} onPress={handleSignOut}>
         <LogOut size={20} color={adminTheme.colors.danger} style={styles.logoutIcon} />

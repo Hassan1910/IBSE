@@ -49,11 +49,13 @@ export default function LandlordUnits() {
   };
 
   const fetchUnits = useCallback(async () => {
+    if (!user?.id) return;
     try {
       setLoading(true);
       let query = supabase
         .from('units')
         .select('id, property_id, unit_number, rent_amount, status, tenant_id, profiles:tenant_id ( full_name ), properties ( title )')
+        .eq('owner_id', user.id)
         .order('unit_number', { ascending: true });
 
       if (propertyId) query = query.eq('property_id', propertyId);
@@ -67,7 +69,7 @@ export default function LandlordUnits() {
     } finally {
       setLoading(false);
     }
-  }, [propertyId]);
+  }, [propertyId, user?.id]);
 
   useEffect(() => {
     fetchUnits();

@@ -109,12 +109,13 @@ export default function LandlordProperties() {
   };
 
   const fetchProperties = useCallback(async () => {
+    if (!user?.id) return;
     try {
       setLoading(true);
-      // RLS returns only properties this landlord owns.
       const { data, error } = await supabase
         .from('properties')
         .select('*')
+        .eq('owner_id', user.id)
         .order('created_at', { ascending: false });
 
       if (error) throw error;
@@ -125,7 +126,7 @@ export default function LandlordProperties() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [user?.id]);
 
   useEffect(() => {
     fetchProperties();

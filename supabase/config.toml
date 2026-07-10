@@ -1,0 +1,14 @@
+# Supabase project configuration.
+#
+# Replace `your-project-ref` with your actual project ref (the subdomain of your
+# EXPO_PUBLIC_SUPABASE_URL, e.g. https://<project-ref>.supabase.co), or run
+# `supabase link --project-ref <project-ref>` which sets it for you.
+project_id = "bqkehphkfkvijxfvgyuh"
+
+# Admin-only user creation. The gateway's built-in verify_jwt check only
+# accepts JWTs signed by Supabase itself, so it rejects Clerk session tokens
+# with a 401 before the function runs. We disable it and instead verify the
+# Clerk JWT signature (via Clerk's JWKS) inside the function, which also
+# checks the caller's profile role is 'admin'.
+[functions.admin-create-user]
+verify_jwt = false

@@ -76,6 +76,11 @@ export default function TenantDashboard() {
           .neq('status', 'resolved'),
       ]);
 
+      console.log('[DEBUG DASHBOARD] user.id:', user.id);
+      console.log('[DEBUG DASHBOARD] leaseRes:', { data: leaseRes.data, error: leaseRes.error });
+      console.log('[DEBUG DASHBOARD] payRes:', { data: payRes.data, error: payRes.error });
+      console.log('[DEBUG DASHBOARD] maintRes:', { data: maintRes.data, count: maintRes.count, error: maintRes.error });
+
       if (leaseRes.error) throw leaseRes.error;
       if (payRes.error) throw payRes.error;
       if (maintRes.error) throw maintRes.error;

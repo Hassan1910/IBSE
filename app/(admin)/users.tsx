@@ -15,6 +15,7 @@ import { supabase } from '../../lib/supabase';
 import { useUser } from '@clerk/clerk-expo';
 import { useAudit } from '../../hooks/useAudit';
 import { X, Shield, Calendar, Trash2, UserPlus, KeyRound, Mail } from 'lucide-react-native';
+import DatePickerModal from '../../components/DatePickerModal';
 
 interface Profile {
   id: string;
@@ -30,6 +31,7 @@ interface Property {
   id: string;
   title: string;
   price: number;
+  owner_id?: string | null;
 }
 
 export default function AdminUsersScreen() {
@@ -37,12 +39,16 @@ export default function AdminUsersScreen() {
   const { log } = useAudit();
   const [users, setUsers] = useState<Profile[]>([]);
   const [properties, setProperties] = useState<Property[]>([]);
+  const [rentalPropertyCount, setRentalPropertyCount] = useState(0);
+  const [loadingProperties, setLoadingProperties] = useState(false);
   const [loading, setLoading] = useState(true);
 
-  // Invite (create account) modal states
+  // Create account modal states
   const [inviteModalVisible, setInviteModalVisible] = useState(false);
-  const [inviteEmail, setInviteEmail] = useState('');
-  const [inviteName, setInviteName] = useState('');
+  const [newEmail, setNewEmail] = useState('');
+  const [newUsername, setNewUsername] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
   const [inviteRole, setInviteRole] = useState<InviteRole>('client');
   const [submittingInvite, setSubmittingInvite] = useState(false);
 
@@ -54,16 +60,56 @@ export default function AdminUsersScreen() {
   const [endDate, setEndDate] = useState('');
   const [rentAmount, setRentAmount] = useState('');
   const [submittingLease, setSubmittingLease] = useState(false);
+  const [startDatePickerVisible, setStartDatePickerVisible] = useState(false);
+  const [endDatePickerVisible, setEndDatePickerVisible] = useState(false);
 
   // Role Edit Modal
   const [roleModalVisible, setRoleModalVisible] = useState(false);
   const [selectedRole, setSelectedRole] = useState<'admin' | 'finance' | 'booking' | 'tenant' | 'client' | 'landlord'>('client');
 
+  const fetchAvailableProperties = async () => {
+    try {
+      setLoadingProperties(true);
+
+      const [
+        { data: propData, error: propError },
+        { data: activeLeases, error: leaseError },
+        { count: rentalCount, error: countError },
+      ] = await Promise.all([
+        supabase
+          .from('properties')
+          .select('id, title, price, owner_id')
+          .eq('type', 'rental')
+          .eq('status', 'available')
+          .order('title', { ascending: true }),
+        supabase.from('leases').select('property_id').eq('status', 'active'),
+        supabase
+          .from('properties')
+          .select('id', { count: 'exact', head: true })
+          .eq('type', 'rental'),
+      ]);
+
+      if (propError) throw propError;
+      if (leaseError) throw leaseError;
+      if (countError) throw countError;
+
+      const leasedPropertyIds = new Set((activeLeases ?? []).map((lease) => lease.property_id));
+      const available = (propData ?? []).filter((property) => !leasedPropertyIds.has(property.id));
+
+      setProperties(available);
+      setRentalPropertyCount(rentalCount ?? 0);
+    } catch (err: any) {
+      console.error('Fetch available properties error:', err);
+      Alert.alert('Error', 'Failed to load available rental properties.');
+    } finally {
+      setLoadingProperties(false);
+    }
+  };
+
   const fetchData = async () => {
     try {
       setLoading(true);
 
-      // Fetch users
       const { data: userData, error: userError } = await supabase
         .from('profiles')
         .select('*')
@@ -72,15 +118,7 @@ export default function AdminUsersScreen() {
       if (userError) throw userError;
       setUsers(userData || []);
 
-      // Fetch available properties for lease assignment
-      const { data: propData, error: propError } = await supabase
-        .from('properties')
-        .select('id, title, price')
-        .eq('status', 'available')
-        .eq('type', 'rental');
-
-      if (propError) throw propError;
-      setProperties(propData || []);
+      await fetchAvailableProperties();
     } catch (err: any) {
       console.error('Fetch admin data error:', err);
       Alert.alert('Error', 'Failed to retrieve user registry.');
@@ -118,56 +156,74 @@ export default function AdminUsersScreen() {
     }
   };
 
-  const handleCreateInvite = async () => {
-    const email = inviteEmail.trim().toLowerCase();
+  const handleCreateUser = async () => {
+    const email = newEmail.trim().toLowerCase();
+    const username = newUsername.trim();
+
     if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
       Alert.alert('Validation Error', 'Please enter a valid email address.');
       return;
     }
+    if (!username) {
+      Alert.alert('Validation Error', 'Please enter a username.');
+      return;
+    }
+    if (newPassword.length < 8) {
+      Alert.alert('Validation Error', 'Password must be at least 8 characters.');
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      Alert.alert('Validation Error', 'Passwords do not match.');
+      return;
+    }
+
     try {
       setSubmittingInvite(true);
 
-      // --- DEBUG: diagnose RLS / JWT issue ---
-      const { data: jwtDebug, error: jwtErr } = await supabase.rpc('get_jwt_sub');
-      console.log('[DEBUG invite] auth.jwt() sub from DB:', jwtDebug, 'error:', jwtErr);
-      console.log('[DEBUG invite] currentUser.id from Clerk:', currentUser?.id);
+      const { data, error } = await supabase.functions.invoke('admin-create-user', {
+        body: { email, username, role: inviteRole, password: newPassword },
+      });
 
-      const { data: profileCheck } = await supabase
-        .from('profiles')
-        .select('id, role')
-        .eq('id', currentUser?.id ?? '')
-        .single();
-      console.log('[DEBUG invite] profile check:', profileCheck);
-      // --- END DEBUG ---
-
-      const { error } = await supabase.from('user_invites').upsert(
-        {
-          email,
-          full_name: inviteName.trim() || null,
-          role: inviteRole,
-          status: 'pending',
-          invited_by: currentUser?.id ?? null,
-        },
-        { onConflict: 'email' },
-      );
-      if (error) throw error;
+      // Supabase surfaces non-2xx responses as an error; try to read the message.
+      if (error) {
+        let message = 'Failed to create the user account.';
+        try {
+          const ctx = (error as any).context;
+          if (ctx && typeof ctx.json === 'function') {
+            const parsed = await ctx.json();
+            if (parsed?.error) message = parsed.error;
+          }
+        } catch {
+          // Ignore parse errors and fall back to the generic message.
+        }
+        Alert.alert('Error', message);
+        return;
+      }
+      if (data?.error) {
+        Alert.alert('Error', data.error);
+        return;
+      }
 
       log({
         action: 'create',
-        entityType: 'user_invite',
-        description: `Invited ${email} as ${inviteRole}`,
+        entityType: 'user',
+        entityId: data?.userId,
+        description: `Created account for ${email} as ${inviteRole}`,
       });
       Alert.alert(
-        'User Invited',
-        `${email} is pre-registered as ${inviteRole}. When they sign up with this email, the role is applied automatically.`,
+        'Account Created',
+        `An account for ${email} was created with the ${inviteRole} role. Share these login credentials with the user:\n\nEmail: ${email}\nPassword: (the one you set)\n\nThey can change their password later from their profile.`,
       );
       setInviteModalVisible(false);
-      setInviteEmail('');
-      setInviteName('');
+      setNewEmail('');
+      setNewUsername('');
+      setNewPassword('');
+      setConfirmPassword('');
       setInviteRole('client');
+      fetchData();
     } catch (err: any) {
-      console.error('Create invite error:', err);
-      Alert.alert('Error', 'Failed to create the user invite.');
+      console.error('Create user error:', err);
+      Alert.alert('Error', err?.message || 'Failed to create the user account.');
     } finally {
       setSubmittingInvite(false);
     }
@@ -242,10 +298,15 @@ export default function AdminUsersScreen() {
     try {
       setSubmittingLease(true);
 
+      // Find property owner_id
+      const selectedProp = properties.find((p) => p.id === selectedPropertyId);
+      const ownerId = selectedProp?.owner_id || currentUser?.id || null;
+
       // 1. Insert lease record
       const { error: leaseError } = await supabase.from('leases').insert({
         property_id: selectedPropertyId,
         tenant_id: selectedUser.id,
+        owner_id: ownerId,
         start_date: startDate,
         end_date: endDate,
         rent_amount: rentNum,
@@ -292,10 +353,14 @@ export default function AdminUsersScreen() {
     }
   };
 
-  const openLeaseModal = (user: Profile) => {
+  const openLeaseModal = async (user: Profile) => {
     setSelectedUser(user);
-    // Find preselected price if property details are known
+    setSelectedPropertyId('');
+    setStartDate('');
+    setEndDate('');
+    setRentAmount('');
     setLeaseModalVisible(true);
+    await fetchAvailableProperties();
   };
 
   const openRoleModal = (user: Profile) => {
@@ -395,8 +460,8 @@ export default function AdminUsersScreen() {
               <View style={styles.inviteNote}>
                 <Mail size={16} color="#38BDF8" style={{ marginRight: 8 }} />
                 <Text style={styles.inviteNoteText}>
-                  Pre-register a user by email and assign their role. When they sign up with this email,
-                  the role is applied automatically.
+                  Create a complete login account. The user signs in with the email and password you set
+                  here, and can change their password later from their profile.
                 </Text>
               </View>
 
@@ -406,22 +471,48 @@ export default function AdminUsersScreen() {
                   style={styles.modalInput}
                   placeholder="name@domain.com"
                   placeholderTextColor="#999"
-                  value={inviteEmail}
-                  onChangeText={setInviteEmail}
+                  value={newEmail}
+                  onChangeText={setNewEmail}
                   autoCapitalize="none"
                   keyboardType="email-address"
                 />
               </View>
 
               <View style={styles.inputGroup}>
-                <Text style={styles.label}>Full Name (optional)</Text>
+                <Text style={styles.label}>Username</Text>
                 <TextInput
                   style={styles.modalInput}
                   placeholder="e.g. Jane Doe"
                   placeholderTextColor="#999"
-                  value={inviteName}
-                  onChangeText={setInviteName}
+                  value={newUsername}
+                  onChangeText={setNewUsername}
                   autoCapitalize="words"
+                />
+              </View>
+
+              <View style={styles.inputGroup}>
+                <Text style={styles.label}>Password</Text>
+                <TextInput
+                  style={styles.modalInput}
+                  placeholder="At least 8 characters"
+                  placeholderTextColor="#999"
+                  value={newPassword}
+                  onChangeText={setNewPassword}
+                  secureTextEntry
+                  autoCapitalize="none"
+                />
+              </View>
+
+              <View style={styles.inputGroup}>
+                <Text style={styles.label}>Confirm Password</Text>
+                <TextInput
+                  style={styles.modalInput}
+                  placeholder="Re-enter the password"
+                  placeholderTextColor="#999"
+                  value={confirmPassword}
+                  onChangeText={setConfirmPassword}
+                  secureTextEntry
+                  autoCapitalize="none"
                 />
               </View>
 
@@ -442,11 +533,11 @@ export default function AdminUsersScreen() {
                 </View>
               </View>
 
-              <TouchableOpacity style={styles.submitBtn} onPress={handleCreateInvite} disabled={submittingInvite}>
+              <TouchableOpacity style={styles.submitBtn} onPress={handleCreateUser} disabled={submittingInvite}>
                 {submittingInvite ? (
                   <ActivityIndicator color="#0F172A" />
                 ) : (
-                  <Text style={styles.submitBtnText}>Create Account Invite</Text>
+                  <Text style={styles.submitBtnText}>Create Account</Text>
                 )}
               </TouchableOpacity>
             </ScrollView>
@@ -528,8 +619,14 @@ export default function AdminUsersScreen() {
                 {/* Property Selection */}
                 <View style={styles.inputGroup}>
                   <Text style={styles.label}>Select Available Property</Text>
-                  {properties.length === 0 ? (
-                    <Text style={styles.errorText}>No available rental properties found. Create listings first!</Text>
+                  {loadingProperties ? (
+                    <ActivityIndicator color="#38BDF8" style={styles.propertyLoader} />
+                  ) : properties.length === 0 ? (
+                    <Text style={styles.errorText}>
+                      {rentalPropertyCount === 0
+                        ? 'No rental listings found. Go to Manage Properties and add a rental listing first.'
+                        : 'All rental properties are currently leased. Mark a property as Available in Manage Properties, or terminate an existing lease to free one up.'}
+                    </Text>
                   ) : (
                     <View style={styles.propertyGrid}>
                       {properties.map((p) => (
@@ -561,24 +658,40 @@ export default function AdminUsersScreen() {
                 {/* Dates */}
                 <View style={styles.inputGroup}>
                   <Text style={styles.label}>Start Date</Text>
-                  <TextInput
-                    style={styles.modalInput}
-                    placeholder="YYYY-MM-DD"
-                    placeholderTextColor="#999"
-                    value={startDate}
-                    onChangeText={setStartDate}
-                  />
+                  <View style={styles.dateInputContainer}>
+                    <TextInput
+                      style={[styles.modalInput, { flex: 1 }]}
+                      placeholder="YYYY-MM-DD"
+                      placeholderTextColor="#999"
+                      value={startDate}
+                      onChangeText={setStartDate}
+                    />
+                    <TouchableOpacity
+                      style={styles.calendarIconBtn}
+                      onPress={() => setStartDatePickerVisible(true)}
+                    >
+                      <Calendar size={20} color="#38BDF8" />
+                    </TouchableOpacity>
+                  </View>
                 </View>
 
                 <View style={styles.inputGroup}>
                   <Text style={styles.label}>End Date</Text>
-                  <TextInput
-                    style={styles.modalInput}
-                    placeholder="YYYY-MM-DD"
-                    placeholderTextColor="#999"
-                    value={endDate}
-                    onChangeText={setEndDate}
-                  />
+                  <View style={styles.dateInputContainer}>
+                    <TextInput
+                      style={[styles.modalInput, { flex: 1 }]}
+                      placeholder="YYYY-MM-DD"
+                      placeholderTextColor="#999"
+                      value={endDate}
+                      onChangeText={setEndDate}
+                    />
+                    <TouchableOpacity
+                      style={styles.calendarIconBtn}
+                      onPress={() => setEndDatePickerVisible(true)}
+                    >
+                      <Calendar size={20} color="#38BDF8" />
+                    </TouchableOpacity>
+                  </View>
                 </View>
 
                 {/* Rent Amount */}
@@ -597,7 +710,7 @@ export default function AdminUsersScreen() {
                 <TouchableOpacity
                   style={styles.submitBtn}
                   onPress={handleCreateLease}
-                  disabled={submittingLease || properties.length === 0}
+                  disabled={submittingLease || loadingProperties || properties.length === 0}
                 >
                   {submittingLease ? (
                     <ActivityIndicator color="#0F172A" />
@@ -610,6 +723,23 @@ export default function AdminUsersScreen() {
           </View>
         </View>
       </Modal>
+
+      {/* Date Pickers */}
+      <DatePickerModal
+        visible={startDatePickerVisible}
+        onClose={() => setStartDatePickerVisible(false)}
+        value={startDate}
+        onChange={setStartDate}
+        title="Select Start Date"
+      />
+
+      <DatePickerModal
+        visible={endDatePickerVisible}
+        onClose={() => setEndDatePickerVisible(false)}
+        value={endDate}
+        onChange={setEndDate}
+        title="Select End Date"
+      />
     </View>
   );
 }
@@ -810,6 +940,20 @@ const styles = StyleSheet.create({
     color: '#F8FAFC',
     fontSize: 15,
   },
+  dateInputContainer: {
+    flexDirection: 'row',
+    alignItems: 'stretch',
+  },
+  calendarIconBtn: {
+    backgroundColor: '#0F172A',
+    borderColor: '#334155',
+    borderWidth: 1,
+    borderRadius: 8,
+    paddingHorizontal: 14,
+    marginLeft: 8,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
   roleSelectionRow: {
     marginVertical: 10,
   },
@@ -845,6 +989,9 @@ const styles = StyleSheet.create({
     color: '#0F172A',
     fontWeight: 'bold',
     fontSize: 16,
+  },
+  propertyLoader: {
+    marginVertical: 8,
   },
   propertyGrid: {
     marginVertical: 4,

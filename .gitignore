@@ -50,3 +50,6 @@ test-supabase.mjs
 # Cursor settings
 .cursor/
 
+# Supabase CLI temp files
+supabase/.temp/
+

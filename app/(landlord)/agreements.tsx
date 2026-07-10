@@ -62,11 +62,13 @@ export default function LandlordAgreements() {
   const [renewEndDate, setRenewEndDate] = useState('');
 
   const fetchLeases = useCallback(async () => {
+    if (!user?.id) return;
     try {
       setLoading(true);
       const { data, error } = await supabase
         .from('leases')
         .select('id, property_id, unit_id, tenant_id, start_date, end_date, rent_amount, status, terms, contract_url, properties ( title ), profiles:tenant_id ( full_name )')
+        .eq('owner_id', user.id)
         .order('start_date', { ascending: false });
       if (error) throw error;
       setLeases((data as any) || []);
@@ -76,9 +78,10 @@ export default function LandlordAgreements() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [user?.id]);
 
   const fetchOptions = useCallback(async () => {
+    if (!user?.id) return;
     const { data: profs } = await supabase
       .from('profiles')
       .select('id, full_name, role')
@@ -90,9 +93,10 @@ export default function LandlordAgreements() {
       .from('properties')
       .select('id, title, price')
       .eq('type', 'rental')
+      .eq('owner_id', user.id)
       .order('title', { ascending: true });
     setProperties((props as any) || []);
-  }, []);
+  }, [user?.id]);
 
   useEffect(() => {
     fetchLeases();

@@ -34,12 +34,13 @@ export default function LandlordPayments() {
   const [totals, setTotals] = useState({ collected: 0, pending: 0 });
 
   const fetchPayments = useCallback(async () => {
+    if (!user?.id) return;
     try {
       setLoading(true);
-      // RLS returns only payments on leases owned by this landlord.
       const { data, error } = await supabase
         .from('payments')
-        .select('id, amount, payment_method, reference_code, payment_date, status, profiles:payer_id ( full_name, email ), leases ( end_date, properties ( title ) )')
+        .select('id, amount, payment_method, reference_code, payment_date, status, profiles:payer_id ( full_name, email ), leases!inner ( owner_id, end_date, properties ( title ) )')
+        .eq('leases.owner_id', user.id)
         .order('payment_date', { ascending: false });
       if (error) throw error;
       const rows = (data as any as Payment[]) || [];
@@ -54,7 +55,7 @@ export default function LandlordPayments() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [user?.id]);
 
   useEffect(() => {
     fetchPayments();
