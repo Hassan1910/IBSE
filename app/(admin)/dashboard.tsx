@@ -6,12 +6,15 @@ import {
   StyleSheet,
   TouchableOpacity,
   Alert,
+  Image,
+  ScrollView,
 } from 'react-native';
 import { supabase } from '../../lib/supabase';
 import { useUser } from '@clerk/clerk-expo';
 import { useRole } from '../../hooks/useRole';
 import { notifyUser } from '../../lib/notifications';
 import MaterialsUsedModal from '../../components/MaterialsUsedModal';
+import NotificationBell from '../../components/NotificationBell';
 import StatCard from '../../components/admin/StatCard';
 import SegmentedTabs from '../../components/admin/SegmentedTabs';
 import QueueCard, {
@@ -21,6 +24,7 @@ import QueueCard, {
 } from '../../components/admin/QueueCard';
 import DashboardSkeleton from '../../components/admin/DashboardSkeleton';
 import { adminTheme } from '../../constants/adminTheme';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 import {
   CreditCard,
   User,
@@ -87,6 +91,7 @@ interface Payment {
 
 interface Booking {
   id: string;
+  client_id: string;
   booking_date: string;
   type: 'viewing' | 'reservation';
   status: 'pending' | 'approved' | 'declined';
@@ -110,6 +115,7 @@ interface MaintenanceRequest {
   priority: 'low' | 'medium' | 'high';
   status: 'pending' | 'in_progress' | 'resolved';
   created_at: string;
+  image_urls: string[] | null;
   properties: {
     title: string;
   };
@@ -134,6 +140,8 @@ type DashboardTab = 'payments' | 'bookings' | 'maintenance' | 'feedback';
 export default function AdminDashboard() {
   const { user } = useUser();
   const { role, loading: roleLoading } = useRole();
+  const router = useRouter();
+  const { tab: tabParam, id: focusId } = useLocalSearchParams<{ tab?: string; id?: string }>();
   // Finance staff only handle payment verification; operational queues
   // (bookings, maintenance, feedback) are hidden from them.
   const isFinance = role === 'finance';
@@ -149,6 +157,7 @@ export default function AdminDashboard() {
   const [loading, setLoading] = useState(true);
   const [stats, setStats] = useState({ totalRevenue: 0, activeLeases: 0, pendingBookings: 0, openMaintenance: 0 });
   const [materialsRequest, setMaterialsRequest] = useState<MaintenanceRequest | null>(null);
+  const [highlightedId, setHighlightedId] = useState<string | null>(null);
 
   const fetchDashboardData = async () => {
     try {
@@ -186,6 +195,7 @@ export default function AdminDashboard() {
           .from('bookings')
           .select(`
             id,
+            client_id,
             booking_date,
             type,
             status,
@@ -210,6 +220,7 @@ export default function AdminDashboard() {
             priority,
             status,
             created_at,
+            image_urls,
             properties ( title ),
             profiles ( full_name )
           `)
@@ -294,6 +305,17 @@ export default function AdminDashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isFinance]);
 
+  // Deep-link from notifications: switch tab and highlight the entity.
+  useEffect(() => {
+    if (tabParam && availableTabs.includes(tabParam as DashboardTab)) {
+      setActiveTab(tabParam as DashboardTab);
+    }
+    if (focusId) {
+      setHighlightedId(focusId);
+      router.setParams({ id: undefined, tab: undefined });
+    }
+  }, [tabParam, focusId, router]);
+
   const handleVerifyPayment = async (id: string, action: 'verified' | 'failed') => {
     try {
       const current = payments.find((p) => p.id === id);
@@ -304,7 +326,12 @@ export default function AdminDashboard() {
 
       if (error) throw error;
 
-      Alert.alert('Success', `Payment reference marked as ${action === 'verified' ? 'Verified' : 'Failed'}.`);
+      Alert.alert(
+        'Success',
+        action === 'verified'
+          ? 'Payment verified. If this was the first payment on a pending lease, the lease is now active.'
+          : 'Payment reference marked as Failed.'
+      );
       setPayments((prev) => prev.filter((p) => p.id !== id));
       if (current) {
         await notifyUser({
@@ -329,6 +356,7 @@ export default function AdminDashboard() {
 
   const handleVerifyBooking = async (id: string, action: 'approved' | 'declined') => {
     try {
+      const current = bookings.find((b) => b.id === id);
       const { error } = await supabase
         .from('bookings')
         .update({ status: action })
@@ -338,6 +366,19 @@ export default function AdminDashboard() {
 
       Alert.alert('Success', `Booking request marked as ${action.toUpperCase()}.`);
       setBookings((prev) => prev.filter((b) => b.id !== id));
+      if (current?.client_id) {
+        await notifyUser({
+          userId: current.client_id,
+          type: 'booking_update',
+          title: action === 'approved' ? 'Booking Approved' : 'Booking Declined',
+          body:
+            action === 'approved'
+              ? `Your ${current.type} request for ${current.properties?.title || 'a property'} was approved.`
+              : `Your ${current.type} request for ${current.properties?.title || 'a property'} was declined.`,
+          entityType: 'booking',
+          entityId: current.id,
+        });
+      }
       fetchDashboardData();
     } catch (err: any) {
       console.error('Verify booking error:', err);
@@ -587,6 +628,13 @@ export default function AdminDashboard() {
         <Text style={styles.locationText}>Property: {item.properties?.title}</Text>
         <QueueCardDivider />
         <Text style={styles.maintDesc}>{item.description}</Text>
+        {item.image_urls?.length ? (
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.maintImageRow}>
+            {item.image_urls.map((uri) => (
+              <Image key={uri} source={{ uri }} style={styles.maintImage} />
+            ))}
+          </ScrollView>
+        ) : null}
         <QueueCardInfoRow icon={<User size={16} color={adminTheme.colors.accent} style={styles.icon} />}>
           <Text style={styles.clientName}>Tenant: {item.profiles?.full_name}</Text>
         </QueueCardInfoRow>
@@ -624,12 +672,22 @@ export default function AdminDashboard() {
         badge={{ label: item.type.toUpperCase(), ...colors }}
         accentColor={colors.text}
         actions={
-          <QueueCardActionButton
-            label="Dismiss"
-            variant="danger"
-            onPress={() => handleDeleteFeedback(item.id)}
-            icon={<X size={16} color={adminTheme.colors.danger} style={styles.btnIcon} />}
-          />
+          <View style={{ flexDirection: 'row', gap: 8 }}>
+            <QueueCardActionButton
+              label="Reply"
+              variant="primary"
+              onPress={() =>
+                router.push({ pathname: '/(admin)/support', params: { id: item.id } })
+              }
+              icon={<MessageSquare size={16} color={adminTheme.colors.onAccent} style={styles.btnIcon} />}
+            />
+            <QueueCardActionButton
+              label="Dismiss"
+              variant="danger"
+              onPress={() => handleDeleteFeedback(item.id)}
+              icon={<X size={16} color={adminTheme.colors.danger} style={styles.btnIcon} />}
+            />
+          </View>
         }
       >
         <Text style={styles.clientEmail}>{item.profiles?.email}</Text>
@@ -653,13 +711,18 @@ export default function AdminDashboard() {
 
     return (
       <View style={styles.statsContainer}>
-        <Text style={styles.greeting}>
-          {getGreeting()}, {firstName}
-        </Text>
-        <Text style={styles.dateLabel}>{todayLabel}</Text>
-        <Text style={styles.hubSubtitle}>
-          {isFinance ? 'Payment Verification' : 'Operations Hub'}
-        </Text>
+        <View style={styles.greetingRow}>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.greeting}>
+              {getGreeting()}, {firstName}
+            </Text>
+            <Text style={styles.dateLabel}>{todayLabel}</Text>
+            <Text style={styles.hubSubtitle}>
+              {isFinance ? 'Payment Verification' : 'Operations Hub'}
+            </Text>
+          </View>
+          <NotificationBell href="/(admin)/notifications" />
+        </View>
 
         <Text style={styles.statsTitle}>Overview Insights</Text>
         <View style={styles.statsGrid}>
@@ -716,18 +779,28 @@ export default function AdminDashboard() {
   };
 
   const renderItem = ({ item }: { item: any }) => {
+    let content = null;
     switch (activeTab) {
       case 'payments':
-        return renderPaymentItem(item);
+        content = renderPaymentItem(item);
+        break;
       case 'bookings':
-        return renderBookingItem(item);
+        content = renderBookingItem(item);
+        break;
       case 'maintenance':
-        return renderMaintenanceItem(item);
+        content = renderMaintenanceItem(item);
+        break;
       case 'feedback':
-        return renderFeedbackItem(item);
+        content = renderFeedbackItem(item);
+        break;
       default:
         return null;
     }
+    return (
+      <View style={highlightedId === item.id ? styles.highlightedWrap : undefined}>
+        {content}
+      </View>
+    );
   };
 
   const getEmptyMessage = () => {
@@ -796,6 +869,19 @@ const styles = StyleSheet.create({
     fontSize: 22,
     fontWeight: '700',
     color: adminTheme.colors.text,
+    marginBottom: 4,
+  },
+  greetingRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    marginBottom: 8,
+    gap: 12,
+  },
+  highlightedWrap: {
+    borderRadius: 14,
+    borderWidth: 2,
+    borderColor: adminTheme.colors.accent,
     marginBottom: 4,
   },
   dateLabel: {
@@ -893,6 +979,18 @@ const styles = StyleSheet.create({
     fontSize: 14,
     lineHeight: 20,
     marginBottom: adminTheme.spacing.sm,
+  },
+  maintImageRow: {
+    marginBottom: adminTheme.spacing.sm,
+  },
+  maintImage: {
+    width: 88,
+    height: 88,
+    borderRadius: 8,
+    marginRight: 8,
+    backgroundColor: adminTheme.colors.bg,
+    borderWidth: 1,
+    borderColor: adminTheme.colors.border,
   },
   inProgressBadge: {
     flex: 1,

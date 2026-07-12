@@ -1,15 +1,31 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { Platform, useWindowDimensions } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { Drawer } from 'expo-router/drawer';
 import { DrawerToggleButton } from '@react-navigation/drawer';
+import { usePathname, useRouter } from 'expo-router';
 import AdminDrawerContent from '../../components/admin/AdminDrawerContent';
 import { adminTheme } from '../../constants/adminTheme';
 import { ADMIN_NAV_ITEMS, getNavItemByName } from '../../lib/adminNav';
+import { useRole } from '../../hooks/useRole';
 
 export default function AdminLayout() {
   const { width } = useWindowDimensions();
   const isWideWeb = Platform.OS === 'web' && width >= 1024;
+  const { role, loading: roleLoading } = useRole();
+  const pathname = usePathname();
+  const router = useRouter();
+
+  // Finance staff may only use finance-allowed routes (and notifications).
+  useEffect(() => {
+    if (roleLoading || role !== 'finance') return;
+    const segment = pathname.split('/').filter(Boolean).pop() || '';
+    if (segment === 'notifications') return;
+    const item = getNavItemByName(segment);
+    if (item?.adminOnly) {
+      router.replace('/(admin)/dashboard');
+    }
+  }, [role, roleLoading, pathname, router]);
 
   const hiddenDrawerItem = { display: 'none' as const, height: 0, width: 0 };
 
@@ -57,6 +73,13 @@ export default function AdminLayout() {
             />
           );
         })}
+        <Drawer.Screen
+          name="notifications"
+          options={{
+            title: 'Notifications',
+            drawerItemStyle: hiddenDrawerItem,
+          }}
+        />
       </Drawer>
     </GestureHandlerRootView>
   );

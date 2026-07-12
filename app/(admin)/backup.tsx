@@ -69,7 +69,7 @@ export default function AdminBackupScreen() {
     try {
       setRunning(true);
 
-      // Snapshot record counts across all core tables.
+      // Integrity snapshot: record counts only (not a full data dump).
       const counts: Record<string, number> = {};
       let total = 0;
       for (const table of BACKED_UP_TABLES) {
@@ -93,46 +93,54 @@ export default function AdminBackupScreen() {
         status: 'completed',
         table_counts: counts,
         total_records: total,
-        notes: `Verified ${BACKED_UP_TABLES.length} tables, ${total} records.`,
+        notes: `Integrity check across ${BACKED_UP_TABLES.length} tables, ${total} records.`,
         created_by: user?.id ?? null,
       });
       if (insertError) throw insertError;
 
-      log({ action: 'backup', entityType: 'system', description: `Created backup (${total} records)` });
-      Alert.alert('Backup Complete', `Snapshot saved: ${total} records across ${BACKED_UP_TABLES.length} tables.`);
+      log({ action: 'backup', entityType: 'system', description: `Created integrity snapshot (${total} records)` });
+      Alert.alert(
+        'Snapshot Saved',
+        `Recorded counts for ${total} rows across ${BACKED_UP_TABLES.length} tables. This is an integrity checkpoint, not a downloadable database backup.`,
+      );
       fetchBackups();
     } catch (err) {
       console.error('Run backup error:', err);
-      Alert.alert('Error', 'Backup failed. Please try again.');
+      Alert.alert('Error', 'Snapshot failed. Please try again.');
     } finally {
       setRunning(false);
     }
   };
 
-  const restoreBackup = (item: Backup) => {
+  const logRecoveryEvent = (item: Backup) => {
     Alert.alert(
-      'Restore Checkpoint',
-      `This records a restore action against "${item.label}". A full point-in-time database restore is performed from the Supabase dashboard; this logs the recovery event for accountability.`,
+      'Log Recovery Event',
+      `Record that you performed a recovery related to "${item.label}"? This does not restore data — use the Supabase dashboard for point-in-time recovery.`,
       [
         { text: 'Cancel', style: 'cancel' },
         {
-          text: 'Confirm',
+          text: 'Log Event',
           onPress: async () => {
             try {
               const { error } = await supabase.from('backups').insert({
-                label: `Restore of ${item.label}`,
+                label: `Recovery note: ${item.label}`,
                 status: 'restored',
                 table_counts: item.table_counts,
                 total_records: item.total_records,
-                notes: `Recovery event referencing snapshot ${item.id}.`,
+                notes: `Recovery accountability log referencing snapshot ${item.id}. Actual restore is done in Supabase.`,
                 created_by: user?.id ?? null,
               });
               if (error) throw error;
-              log({ action: 'restore', entityType: 'system', entityId: item.id, description: `Restore ${item.label}` });
+              log({
+                action: 'restore',
+                entityType: 'system',
+                entityId: item.id,
+                description: `Logged recovery for ${item.label}`,
+              });
               fetchBackups();
             } catch (err) {
-              console.error('Restore error:', err);
-              Alert.alert('Error', 'Failed to record restore.');
+              console.error('Restore log error:', err);
+              Alert.alert('Error', 'Failed to record recovery event.');
             }
           },
         },
@@ -164,10 +172,10 @@ export default function AdminBackupScreen() {
     <View>
       <View style={styles.heroCard}>
         <ShieldCheck size={28} color="#38BDF8" />
-        <Text style={styles.heroTitle}>Protect Your Data</Text>
+        <Text style={styles.heroTitle}>Integrity Snapshots</Text>
         <Text style={styles.heroText}>
-          Create a verified snapshot of all system records. Snapshots capture record counts across every
-          core table so you can confirm data integrity and track recovery points.
+          Record row counts across core tables as an integrity checkpoint. This is not a full database
+          dump — use the Supabase dashboard for real backups and point-in-time recovery.
         </Text>
         <TouchableOpacity style={styles.backupBtn} onPress={runBackup} disabled={running}>
           {running ? (
@@ -175,13 +183,13 @@ export default function AdminBackupScreen() {
           ) : (
             <>
               <DatabaseBackup size={18} color="#0F172A" style={{ marginRight: 8 }} />
-              <Text style={styles.backupBtnText}>Create Backup Now</Text>
+              <Text style={styles.backupBtnText}>Create Snapshot</Text>
             </>
           )}
         </TouchableOpacity>
       </View>
 
-      <Text style={styles.listTitle}>Backup History</Text>
+      <Text style={styles.listTitle}>Snapshot & Recovery Log</Text>
     </View>
   );
 
@@ -219,9 +227,9 @@ export default function AdminBackupScreen() {
               </View>
 
               {item.status !== 'restored' && (
-                <TouchableOpacity style={styles.restoreBtn} onPress={() => restoreBackup(item)}>
+                <TouchableOpacity style={styles.restoreBtn} onPress={() => logRecoveryEvent(item)}>
                   <RotateCcw size={15} color="#38BDF8" style={{ marginRight: 6 }} />
-                  <Text style={styles.restoreText}>Restore from this point</Text>
+                  <Text style={styles.restoreText}>Log recovery event</Text>
                 </TouchableOpacity>
               )}
             </View>
@@ -232,7 +240,7 @@ export default function AdminBackupScreen() {
           ListEmptyComponent={
             <View style={styles.emptyCentered}>
               <DatabaseBackup size={48} color="#94A3B8" style={{ marginBottom: 12 }} />
-              <Text style={styles.emptyText}>No backups yet. Create your first snapshot above.</Text>
+              <Text style={styles.emptyText}>No snapshots yet. Create your first integrity checkpoint above.</Text>
             </View>
           }
         />

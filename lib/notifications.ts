@@ -3,6 +3,7 @@ import { supabase } from './supabase';
 export type NotificationType =
   | 'rent_due'
   | 'payment_confirmed'
+  | 'payment_submitted'
   | 'maintenance_update'
   | 'lease_expiry'
   | 'announcement'
@@ -62,7 +63,7 @@ export interface NotifyUserInput {
 }
 
 export async function notifyUser(input: NotifyUserInput) {
-  return supabase.from('notifications').insert({
+  const { data, error } = await supabase.from('notifications').insert({
     user_id: input.userId,
     type: input.type,
     title: input.title,
@@ -70,4 +71,27 @@ export async function notifyUser(input: NotifyUserInput) {
     entity_type: input.entityType ?? null,
     entity_id: input.entityId ?? null,
   });
+  if (error) throw error;
+  return { data, error: null };
+}
+
+/** Notify the landlord who owns a property (or admins when owner_id is null). */
+export async function notifyPropertyOwner(input: {
+  propertyId: string;
+  type: NotificationType;
+  title: string;
+  body: string;
+  entityType?: string;
+  entityId?: string;
+}) {
+  const { error } = await supabase.rpc('notify_for_property', {
+    p_property_id: input.propertyId,
+    p_type: input.type,
+    p_title: input.title,
+    p_body: input.body,
+    p_entity_type: input.entityType ?? null,
+    p_entity_id: input.entityId ?? null,
+  });
+  if (error) throw error;
+  return { data: null, error: null };
 }

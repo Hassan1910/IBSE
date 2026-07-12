@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useCallback, useRef, useEffect } from 'react';
 import {
   View,
   Text,
@@ -10,12 +10,15 @@ import {
   TextInput,
   Alert,
   ScrollView,
+  Image,
 } from 'react-native';
+import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import { supabase } from '../../lib/supabase';
 import { useUser } from '@clerk/clerk-expo';
 import { logAudit } from '../../lib/audit';
 import { notifyUser } from '../../lib/notifications';
 import MaterialsUsedModal from '../../components/MaterialsUsedModal';
+import NotificationBell from '../../components/NotificationBell';
 import { Wrench, User as UserIcon, Clock, CheckCircle, ClipboardList, DollarSign, X, Package } from 'lucide-react-native';
 
 interface MaintenanceRequest {
@@ -28,6 +31,7 @@ interface MaintenanceRequest {
   created_at: string;
   assigned_to: string | null;
   expense_amount: number | null;
+  image_urls: string[] | null;
   properties: { title: string } | null;
   profiles: { full_name: string } | null;
 }
@@ -36,9 +40,15 @@ type Filter = 'active' | 'resolved' | 'all';
 
 export default function LandlordMaintenance() {
   const { user } = useUser();
+  const router = useRouter();
+  const { id: focusId } = useLocalSearchParams<{ id?: string }>();
   const [requests, setRequests] = useState<MaintenanceRequest[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const hasLoadedRef = useRef(false);
   const [filter, setFilter] = useState<Filter>('active');
+  const [highlightedId, setHighlightedId] = useState<string | null>(null);
+  const listRef = useRef<FlatList<MaintenanceRequest>>(null);
 
   const [assignVisible, setAssignVisible] = useState(false);
   const [activeRequest, setActiveRequest] = useState<MaintenanceRequest | null>(null);
@@ -47,13 +57,17 @@ export default function LandlordMaintenance() {
   const [saving, setSaving] = useState(false);
   const [materialsRequest, setMaterialsRequest] = useState<MaintenanceRequest | null>(null);
 
-  const fetchRequests = useCallback(async () => {
+  const fetchRequests = useCallback(async (opts?: { silent?: boolean }) => {
     if (!user?.id) return;
     try {
-      setLoading(true);
+      if (opts?.silent) {
+        setRefreshing(true);
+      } else {
+        setLoading(true);
+      }
       const { data, error } = await supabase
         .from('maintenance_requests')
-        .select('id, tenant_id, title, description, priority, status, created_at, assigned_to, expense_amount, properties!inner ( title, owner_id ), profiles:tenant_id ( full_name )')
+        .select('id, tenant_id, title, description, priority, status, created_at, assigned_to, expense_amount, image_urls, properties!inner ( title, owner_id ), profiles:tenant_id ( full_name )')
         .eq('properties.owner_id', user.id)
         .order('created_at', { ascending: false });
       if (error) throw error;
@@ -62,13 +76,40 @@ export default function LandlordMaintenance() {
       console.error('Fetch maintenance error:', err);
       Alert.alert('Error', 'Failed to load maintenance requests.');
     } finally {
+      hasLoadedRef.current = true;
       setLoading(false);
+      setRefreshing(false);
     }
   }, [user?.id]);
 
+  // Tab screens stay mounted, so refetch whenever this screen is focused
+  // (avoids a stale empty list after the initial mount race with auth/data).
+  useFocusEffect(
+    useCallback(() => {
+      fetchRequests({ silent: hasLoadedRef.current });
+    }, [fetchRequests]),
+  );
+
+  // Focus the matching ticket when arriving from the dashboard or a notification.
   useEffect(() => {
-    fetchRequests();
-  }, [fetchRequests]);
+    if (!focusId || loading) return;
+    const match = requests.find((r) => r.id === focusId);
+    if (!match) return;
+    const nextFilter: Filter = match.status === 'resolved' ? 'resolved' : 'active';
+    setFilter(nextFilter);
+    setHighlightedId(match.id);
+    router.setParams({ id: undefined });
+
+    const visible = requests.filter((r) =>
+      nextFilter === 'resolved' ? r.status === 'resolved' : r.status !== 'resolved',
+    );
+    const index = visible.findIndex((r) => r.id === match.id);
+    if (index >= 0) {
+      requestAnimationFrame(() => {
+        listRef.current?.scrollToIndex({ index, animated: true, viewPosition: 0.1 });
+      });
+    }
+  }, [focusId, loading, requests, router]);
 
   const updateStatus = async (item: MaintenanceRequest, nextStatus: 'in_progress' | 'resolved') => {
     try {
@@ -146,16 +187,22 @@ export default function LandlordMaintenance() {
   );
 
   const renderHeader = () => (
-    <View style={styles.segment}>
-      {(['active', 'resolved', 'all'] as Filter[]).map((f) => (
-        <TouchableOpacity
-          key={f}
-          style={[styles.segmentBtn, filter === f && styles.segmentBtnActive]}
-          onPress={() => setFilter(f)}
-        >
-          <Text style={[styles.segmentText, filter === f && styles.segmentTextActive]}>{f.toUpperCase()}</Text>
-        </TouchableOpacity>
-      ))}
+    <View>
+      <View style={styles.topBar}>
+        <Text style={styles.topBarTitle}>Maintenance</Text>
+        <NotificationBell href="/(landlord)/notifications" />
+      </View>
+      <View style={styles.segment}>
+        {(['active', 'resolved', 'all'] as Filter[]).map((f) => (
+          <TouchableOpacity
+            key={f}
+            style={[styles.segmentBtn, filter === f && styles.segmentBtnActive]}
+            onPress={() => setFilter(f)}
+          >
+            <Text style={[styles.segmentText, filter === f && styles.segmentTextActive]}>{f.toUpperCase()}</Text>
+          </TouchableOpacity>
+        ))}
+      </View>
     </View>
   );
 
@@ -167,13 +214,19 @@ export default function LandlordMaintenance() {
         </View>
       ) : (
         <FlatList
+          ref={listRef}
           data={filtered}
           keyExtractor={(item) => item.id}
           ListHeaderComponent={renderHeader}
+          onScrollToIndexFailed={(info) => {
+            setTimeout(() => {
+              listRef.current?.scrollToIndex({ index: info.index, animated: true, viewPosition: 0.1 });
+            }, 100);
+          }}
           renderItem={({ item }) => {
             const colors = priorityColors(item.priority);
             return (
-              <View style={styles.card}>
+              <View style={[styles.card, highlightedId === item.id && styles.highlightedCard]}>
                 <View style={styles.cardHeader}>
                   <Text style={styles.propTitle}>{item.title}</Text>
                   <View style={[styles.badge, { backgroundColor: colors.bg, borderColor: colors.border }]}>
@@ -184,6 +237,14 @@ export default function LandlordMaintenance() {
                 <Text style={styles.locationText}>Property: {item.properties?.title || 'N/A'}</Text>
                 <View style={styles.divider} />
                 <Text style={styles.desc}>{item.description}</Text>
+
+                {item.image_urls?.length ? (
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.imageRow}>
+                    {item.image_urls.map((uri) => (
+                      <Image key={uri} source={{ uri }} style={styles.issueImage} />
+                    ))}
+                  </ScrollView>
+                ) : null}
 
                 <View style={styles.infoRow}>
                   <UserIcon size={14} color="#38BDF8" style={styles.icon} />
@@ -244,8 +305,8 @@ export default function LandlordMaintenance() {
             );
           }}
           contentContainerStyle={styles.listContainer}
-          onRefresh={fetchRequests}
-          refreshing={loading}
+          onRefresh={() => fetchRequests({ silent: true })}
+          refreshing={refreshing}
           ListEmptyComponent={
             <View style={styles.emptyCentered}>
               <Wrench size={48} color="#94A3B8" style={styles.emptyIcon} />
@@ -307,6 +368,13 @@ export default function LandlordMaintenance() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#0F172A' },
+  topBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 12,
+  },
+  topBarTitle: { fontSize: 18, fontWeight: 'bold', color: '#F8FAFC', flex: 1, marginRight: 12 },
   listContainer: { padding: 16, flexGrow: 1 },
   segment: {
     flexDirection: 'row',
@@ -329,6 +397,10 @@ const styles = StyleSheet.create({
     borderColor: '#334155',
     borderWidth: 1,
   },
+  highlightedCard: {
+    borderColor: '#38BDF8',
+    borderWidth: 2,
+  },
   cardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
   propTitle: { fontSize: 15, fontWeight: 'bold', color: '#F8FAFC', flex: 1, marginRight: 8 },
   badge: { paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6, borderWidth: 1 },
@@ -336,6 +408,16 @@ const styles = StyleSheet.create({
   locationText: { fontSize: 13, color: '#94A3B8', marginTop: 2 },
   divider: { height: 1, backgroundColor: '#334155', marginVertical: 12 },
   desc: { color: '#94A3B8', fontSize: 14, lineHeight: 20, marginBottom: 12 },
+  imageRow: { marginBottom: 12 },
+  issueImage: {
+    width: 96,
+    height: 96,
+    borderRadius: 8,
+    marginRight: 8,
+    backgroundColor: '#0F172A',
+    borderWidth: 1,
+    borderColor: '#334155',
+  },
   infoRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 8 },
   icon: { marginRight: 8 },
   infoText: { color: '#94A3B8', fontSize: 13 },

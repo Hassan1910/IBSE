@@ -14,6 +14,7 @@ import {
 import { supabase } from '../../lib/supabase';
 import { useUser } from '@clerk/clerk-expo';
 import { MapPin, Info, Tag, Calendar, X } from 'lucide-react-native';
+import NotificationBell from '../../components/NotificationBell';
 
 interface Property {
   id: string;
@@ -107,7 +108,7 @@ export default function PropertiesScreen() {
 
       if (error) throw error;
 
-      Alert.alert('Success 🎉', `Your ${bookingType} request has been submitted! Our booking officers will review it shortly.`);
+      Alert.alert('Success 🎉', `Your ${bookingType} request has been submitted! Our team will review it shortly.`);
       setBookingModalVisible(false);
       // Reset form fields
       setBookingDate('');
@@ -137,6 +138,11 @@ export default function PropertiesScreen() {
 
   return (
     <View style={styles.container}>
+      <View style={styles.topBar}>
+        <Text style={styles.topBarTitle}>Explore Properties</Text>
+        <NotificationBell href="/(client)/notifications" />
+      </View>
+
       {/* Categories Tab Bar */}
       <View style={styles.tabContainer}>
         {CATEGORIES.map((cat) => (
@@ -339,6 +345,21 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#0F172A',
+  },
+  topBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    backgroundColor: '#1E293B',
+    borderBottomWidth: 1,
+    borderBottomColor: '#334155',
+  },
+  topBarTitle: {
+    color: '#F8FAFC',
+    fontSize: 16,
+    fontWeight: 'bold',
   },
   tabContainer: {
     flexDirection: 'row',

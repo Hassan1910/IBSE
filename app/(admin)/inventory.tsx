@@ -11,7 +11,8 @@ import {
   Alert,
 } from 'react-native';
 import { supabase } from '../../lib/supabase';
-import { Plus, Minus, X, Package, ShieldAlert, Edit2, Trash2, History } from 'lucide-react-native';
+import { getLowStockThreshold } from '../../lib/settings';
+import { Plus, Minus, X, Package, Edit2, Trash2, History } from 'lucide-react-native';
 
 interface InventoryItem {
   id: string;
@@ -125,14 +126,16 @@ export default function AdminInventoryScreen() {
     fetchInventory();
   }, []);
 
+  const stockStatusForQty = async (qty: number) => {
+    const threshold = await getLowStockThreshold();
+    if (qty === 0) return 'out_of_stock' as const;
+    if (qty <= threshold) return 'low_stock' as const;
+    return 'in_stock' as const;
+  };
+
   const handleUpdateQuantity = async (id: string, currentQty: number, change: number) => {
     const nextQty = Math.max(0, currentQty + change);
-    let nextStatus: 'in_stock' | 'low_stock' | 'out_of_stock' = 'in_stock';
-    if (nextQty === 0) {
-      nextStatus = 'out_of_stock';
-    } else if (nextQty < 5) {
-      nextStatus = 'low_stock';
-    }
+    const nextStatus = await stockStatusForQty(nextQty);
 
     try {
       const { error } = await supabase
@@ -166,12 +169,7 @@ export default function AdminInventoryScreen() {
       return;
     }
 
-    let nextStatus: 'in_stock' | 'low_stock' | 'out_of_stock' = 'in_stock';
-    if (numQty === 0) {
-      nextStatus = 'out_of_stock';
-    } else if (numQty < 5) {
-      nextStatus = 'low_stock';
-    }
+    const nextStatus = await stockStatusForQty(numQty);
 
     try {
       setSubmitting(true);

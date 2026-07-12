@@ -1,10 +1,22 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { ActivityIndicator, Alert, FlatList, Image, Modal, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import { supabase } from '../../lib/supabase';
 import { useUser } from '@clerk/clerk-expo';
-import { pickImages, uploadImage } from '../../lib/storage';
+import { pickImages, uploadImage, type PickedImage } from '../../lib/storage';
+import { notifyPropertyOwner } from '../../lib/notifications';
 import { useAudit } from '../../hooks/useAudit';
-import { Camera, CheckCircle, Clock, HelpCircle, Plus, Wrench, X } from 'lucide-react-native';
+import { Camera, CheckCircle, ClipboardList, Clock, DollarSign, HelpCircle, Plus, Wrench, X } from 'lucide-react-native';
+
+function newRequestId() {
+  const c = globalThis.crypto as Crypto | undefined;
+  if (c?.randomUUID) return c.randomUUID();
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (ch) => {
+    const r = (Math.random() * 16) | 0;
+    const v = ch === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
 
 interface MaintenanceRequest {
   id: string;
@@ -14,6 +26,8 @@ interface MaintenanceRequest {
   status: 'pending' | 'in_progress' | 'resolved';
   image_urls: string[] | null;
   tenant_confirmed_at: string | null;
+  assigned_to: string | null;
+  expense_amount: number | null;
   created_at: string;
   properties: {
     title: string;
@@ -23,6 +37,8 @@ interface MaintenanceRequest {
 export default function TenantMaintenanceScreen() {
   const { user } = useUser();
   const { log } = useAudit();
+  const router = useRouter();
+  const { id: focusId } = useLocalSearchParams<{ id?: string }>();
   const [requests, setRequests] = useState<MaintenanceRequest[]>([]);
   const [loading, setLoading] = useState(true);
   const [lease, setLease] = useState<any>(null);
@@ -32,7 +48,7 @@ export default function TenantMaintenanceScreen() {
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [priority, setPriority] = useState<'low' | 'medium' | 'high'>('medium');
-  const [selectedImages, setSelectedImages] = useState<string[]>([]);
+  const [selectedImages, setSelectedImages] = useState<PickedImage[]>([]);
   const [detailItem, setDetailItem] = useState<MaintenanceRequest | null>(null);
   const [detailVisible, setDetailVisible] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -45,19 +61,23 @@ export default function TenantMaintenanceScreen() {
       setLoading(true);
 
       // Fetch active lease to know which property to assign ticket to
-      const { data: leaseData } = await supabase
+      const { data: leaseData, error: leaseError } = await supabase
         .from('leases')
         .select('property_id, properties(title)')
         .eq('tenant_id', user.id)
         .eq('status', 'active')
+        .order('start_date', { ascending: false })
+        .limit(1)
         .maybeSingle();
+
+      if (leaseError) throw leaseError;
 
       setLease(leaseData);
 
       // Fetch tickets
       const { data: tickets, error } = await supabase
         .from('maintenance_requests')
-        .select('id, title, description, priority, status, image_urls, tenant_confirmed_at, created_at, properties ( title )')
+        .select('id, title, description, priority, status, image_urls, tenant_confirmed_at, assigned_to, expense_amount, created_at, properties ( title )')
         .eq('tenant_id', user.id)
         .order('created_at', { ascending: false });
 
@@ -75,10 +95,26 @@ export default function TenantMaintenanceScreen() {
     fetchData();
   }, [user]);
 
+  useFocusEffect(
+    useCallback(() => {
+      if (user?.id) fetchData();
+    }, [user?.id]),
+  );
+
+  // Open the specific ticket when arriving from a notification deep link.
+  useEffect(() => {
+    if (!focusId || loading) return;
+    const match = requests.find((r) => r.id === focusId);
+    if (!match) return;
+    setDetailItem(match);
+    setDetailVisible(true);
+    router.setParams({ id: undefined });
+  }, [focusId, loading, requests, router]);
+
   const handlePickImages = async () => {
     try {
-      const uris = await pickImages(true);
-      if (uris.length) setSelectedImages(uris);
+      const picked = await pickImages(true);
+      if (picked.length) setSelectedImages(picked);
     } catch (err: any) {
       Alert.alert('Image Picker', err.message || 'Failed to pick images.');
     }
@@ -108,32 +144,23 @@ export default function TenantMaintenanceScreen() {
 
     try {
       setSubmitting(true);
-      const { data, error } = await supabase
-        .from('maintenance_requests')
-        .insert({
+      // Upload photos first, then insert with image_urls so we don't rely on a
+      // follow-up UPDATE (previously blocked by RLS for pending tickets).
+      const requestId = newRequestId();
+      const imageUrls = selectedImages.length ? await uploadMaintenanceImages(requestId) : [];
+
+      const { error } = await supabase.from('maintenance_requests').insert({
+        id: requestId,
         property_id: lease.property_id,
         tenant_id: user.id,
         title: title.trim(),
         description: description.trim(),
         priority,
         status: 'pending',
-      })
-        .select('id')
-        .single();
+        image_urls: imageUrls,
+      });
 
       if (error) throw error;
-
-      const requestId = data?.id;
-      if (requestId && selectedImages.length) {
-        const imageUrls = await uploadMaintenanceImages(requestId);
-        if (imageUrls.length) {
-          const { error: imageUpdateError } = await supabase
-            .from('maintenance_requests')
-            .update({ image_urls: imageUrls })
-            .eq('id', requestId);
-          if (imageUpdateError) throw imageUpdateError;
-        }
-      }
 
       await log({
         action: 'create',
@@ -141,6 +168,19 @@ export default function TenantMaintenanceScreen() {
         entityId: requestId,
         description: 'Tenant submitted maintenance request.',
       });
+
+      try {
+        await notifyPropertyOwner({
+          propertyId: lease.property_id,
+          type: 'maintenance_update',
+          title: 'New Maintenance Request',
+          body: `"${title.trim()}" (${priority}) was submitted by a tenant.`,
+          entityType: 'maintenance',
+          entityId: requestId,
+        });
+      } catch (notifyErr) {
+        console.error('Notify landlord of maintenance error:', notifyErr);
+      }
 
       Alert.alert('Success 🎉', 'Your maintenance ticket has been submitted. Technicians will visit shortly.');
       setModalVisible(false);
@@ -150,19 +190,26 @@ export default function TenantMaintenanceScreen() {
       fetchData(); // reload lists
     } catch (err: any) {
       console.error('Submit ticket error:', err);
-      Alert.alert('Error', 'Failed to submit maintenance request.');
+      Alert.alert('Error', err?.message || 'Failed to submit maintenance request.');
     } finally {
       setSubmitting(false);
     }
   };
 
-  const formatDate = (dateStr: string) => {
-    return new Date(dateStr).toLocaleDateString('en-KE', {
+  const formatDateTime = (dateStr: string) =>
+    new Date(dateStr).toLocaleString('en-KE', {
       year: 'numeric',
       month: 'short',
       day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
     });
-  };
+
+  const formatPrice = (p: number) =>
+    new Intl.NumberFormat('en-KE', { style: 'currency', currency: 'KES', maximumFractionDigits: 0 }).format(p);
+
+  const photoUrls = (item: MaintenanceRequest) =>
+    Array.isArray(item.image_urls) ? item.image_urls.filter(Boolean) : [];
 
   const renderStatus = (status: string) => {
     switch (status) {
@@ -261,8 +308,29 @@ export default function TenantMaintenanceScreen() {
                 
                 <Text style={styles.desc}>{item.description}</Text>
 
+                {photoUrls(item).length > 0 ? (
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.cardImageRow}>
+                    {photoUrls(item).map((uri) => (
+                      <Image key={uri} source={{ uri }} style={styles.cardImage} />
+                    ))}
+                  </ScrollView>
+                ) : null}
+
+                {item.assigned_to ? (
+                  <View style={styles.infoRow}>
+                    <ClipboardList size={14} color="#38BDF8" style={styles.infoIcon} />
+                    <Text style={styles.infoText}>Assigned to: {item.assigned_to}</Text>
+                  </View>
+                ) : null}
+                {item.expense_amount != null ? (
+                  <View style={styles.infoRow}>
+                    <DollarSign size={14} color="#38BDF8" style={styles.infoIcon} />
+                    <Text style={styles.infoText}>Cost: {formatPrice(item.expense_amount)}</Text>
+                  </View>
+                ) : null}
+
                 <View style={styles.cardFooter}>
-                  <Text style={styles.date}>{formatDate(item.created_at)}</Text>
+                  <Text style={styles.date}>{formatDateTime(item.created_at)}</Text>
                   <View style={styles.priorityRow}>
                     <Text style={styles.priorityLabel}>Priority: </Text>
                     <Text style={[styles.priorityVal, { color: getPriorityColor(item.priority) }]}>
@@ -369,8 +437,8 @@ export default function TenantMaintenanceScreen() {
                 </TouchableOpacity>
                 {selectedImages.length > 0 ? (
                   <View style={styles.imagePreviewRow}>
-                    {selectedImages.map((uri) => (
-                      <Image key={uri} source={{ uri }} style={styles.previewImage} />
+                    {selectedImages.map((img) => (
+                      <Image key={img.uri} source={{ uri: img.uri }} style={styles.previewImage} />
                     ))}
                   </View>
                 ) : null}
@@ -407,16 +475,22 @@ export default function TenantMaintenanceScreen() {
                 <Text style={styles.detailMeta}>Property: {detailItem.properties?.title}</Text>
                 <Text style={styles.detailMeta}>Status: {detailItem.status.replace('_', ' ').toUpperCase()}</Text>
                 <Text style={styles.detailMeta}>Priority: {detailItem.priority.toUpperCase()}</Text>
-                <Text style={styles.detailMeta}>Reported: {formatDate(detailItem.created_at)}</Text>
+                <Text style={styles.detailMeta}>Reported: {formatDateTime(detailItem.created_at)}</Text>
+                {detailItem.assigned_to ? (
+                  <Text style={styles.detailMeta}>Assigned to: {detailItem.assigned_to}</Text>
+                ) : null}
+                {detailItem.expense_amount != null ? (
+                  <Text style={styles.detailMeta}>Cost: {formatPrice(detailItem.expense_amount)}</Text>
+                ) : null}
                 <Text style={styles.detailTimeline}>{timelineStatus}</Text>
                 <Text style={styles.detailDescription}>{detailItem.description}</Text>
 
-                {detailItem.image_urls?.length ? (
-                  <View style={styles.imagePreviewRow}>
-                    {detailItem.image_urls.map((uri) => (
-                      <Image key={uri} source={{ uri }} style={styles.previewImage} />
+                {photoUrls(detailItem).length > 0 ? (
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.detailImageRow}>
+                    {photoUrls(detailItem).map((uri) => (
+                      <Image key={uri} source={{ uri }} style={styles.detailImage} />
                     ))}
-                  </View>
+                  </ScrollView>
                 ) : (
                   <Text style={styles.emptyText}>No issue photos attached.</Text>
                 )}
@@ -486,6 +560,18 @@ const styles = StyleSheet.create({
     fontSize: 14,
     lineHeight: 20,
     marginBottom: 14,
+  },
+  infoRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  infoIcon: {
+    marginRight: 8,
+  },
+  infoText: {
+    color: '#94A3B8',
+    fontSize: 13,
   },
   cardFooter: {
     flexDirection: 'row',
@@ -673,6 +759,26 @@ const styles = StyleSheet.create({
   imagePickerText: { color: '#38BDF8', fontWeight: '600' },
   imagePreviewRow: { flexDirection: 'row', flexWrap: 'wrap', marginTop: 10 },
   previewImage: { width: 60, height: 60, borderRadius: 8, marginRight: 8, marginBottom: 8 },
+  cardImageRow: { marginBottom: 12 },
+  cardImage: {
+    width: 88,
+    height: 88,
+    borderRadius: 8,
+    marginRight: 8,
+    backgroundColor: '#0F172A',
+    borderWidth: 1,
+    borderColor: '#334155',
+  },
+  detailImageRow: { marginBottom: 12 },
+  detailImage: {
+    width: 140,
+    height: 140,
+    borderRadius: 10,
+    marginRight: 10,
+    backgroundColor: '#0F172A',
+    borderWidth: 1,
+    borderColor: '#334155',
+  },
   detailTitle: { color: '#F8FAFC', fontSize: 16, fontWeight: 'bold', marginBottom: 8 },
   detailMeta: { color: '#94A3B8', marginBottom: 4, fontSize: 13 },
   detailTimeline: { color: '#38BDF8', marginTop: 4, marginBottom: 10, fontWeight: '600' },

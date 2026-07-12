@@ -1,15 +1,20 @@
 // Edge Function: admin-create-user
 //
 // Creates a complete user account (Clerk identity + Supabase profile) on behalf
-// of an admin. The admin sets the email, username, role and password directly;
-// the new user can then log in immediately with those credentials.
+// of an authorized caller. The caller sets the email, username, role and
+// password directly; the new user can then log in immediately with those
+// credentials.
+//
+// Authorization:
+// - Admins may create accounts with any allowed role.
+// - Landlords may create accounts only with the `tenant` role.
 //
 // Security model:
 // - The gateway's verify_jwt check is disabled (it only accepts JWTs signed by
 //   Supabase itself, not Clerk tokens), so this function verifies the caller's
 //   Clerk JWT signature against the instance's JWKS before doing anything.
-// - We additionally confirm the caller's profile role is 'admin' using the
-//   service-role client before creating anything.
+// - We additionally confirm the caller's profile role using the service-role
+//   client before creating anything.
 //
 // Required secrets (set via `supabase secrets set`):
 //   CLERK_SECRET_KEY
@@ -19,7 +24,7 @@
 import { createClient } from 'jsr:@supabase/supabase-js@2';
 import * as jose from 'jsr:@panva/jose@6';
 
-const ALLOWED_ROLES = ['admin', 'finance', 'booking', 'tenant', 'client', 'landlord'];
+const ALLOWED_ROLES = ['admin', 'finance', 'tenant', 'client', 'landlord'];
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const CLERK_API = 'https://api.clerk.com/v1/users';
 
@@ -104,8 +109,12 @@ Deno.serve(async (req) => {
     .eq('id', callerId)
     .single();
 
-  if (callerError || callerProfile?.role !== 'admin') {
-    return json({ error: 'Only admins can create user accounts.' }, 403);
+  const callerRole = callerProfile?.role as string | undefined;
+  const isAdmin = callerRole === 'admin';
+  const isLandlord = callerRole === 'landlord';
+
+  if (callerError || (!isAdmin && !isLandlord)) {
+    return json({ error: 'Only admins and landlords can create user accounts.' }, 403);
   }
 
   // --- Validate input ---
@@ -134,6 +143,10 @@ Deno.serve(async (req) => {
   }
   if (!ALLOWED_ROLES.includes(role)) {
     return json({ error: 'Please select a valid role.' }, 400);
+  }
+  // Landlords may only provision tenant accounts — never staff/admin roles.
+  if (isLandlord && role !== 'tenant') {
+    return json({ error: 'Landlords can only create tenant accounts.' }, 403);
   }
   if (password.length < 8) {
     return json({ error: 'Password must be at least 8 characters.' }, 400);

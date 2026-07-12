@@ -116,8 +116,8 @@ export const ADMIN_NAV_ITEMS: AdminNavItem[] = [
   },
   {
     name: 'backup',
-    label: 'Backup',
-    title: 'Backup & Recovery',
+    label: 'Snapshots',
+    title: 'Integrity Snapshots',
     icon: DatabaseBackup,
     section: 'system',
     adminOnly: true,

@@ -11,7 +11,7 @@ import {
   Alert,
   ScrollView,
 } from 'react-native';
-import { useLocalSearchParams } from 'expo-router';
+import { useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { useUser } from '@clerk/clerk-expo';
 import { supabase } from '../../lib/supabase';
 import { logAudit } from '../../lib/audit';
@@ -54,8 +54,8 @@ export default function LandlordUnits() {
       setLoading(true);
       let query = supabase
         .from('units')
-        .select('id, property_id, unit_number, rent_amount, status, tenant_id, profiles:tenant_id ( full_name ), properties ( title )')
-        .eq('owner_id', user.id)
+        .select('id, property_id, unit_number, rent_amount, status, tenant_id, profiles:tenant_id ( full_name ), properties!inner ( title, owner_id )')
+        .eq('properties.owner_id', user.id)
         .order('unit_number', { ascending: true });
 
       if (propertyId) query = query.eq('property_id', propertyId);
@@ -75,6 +75,12 @@ export default function LandlordUnits() {
     fetchUnits();
   }, [fetchUnits]);
 
+  useFocusEffect(
+    useCallback(() => {
+      fetchUnits();
+    }, [fetchUnits])
+  );
+
   const handleEdit = (unit: UnitRow) => {
     setEditingId(unit.id);
     setUnitNumber(unit.unit_number);
@@ -93,6 +99,13 @@ export default function LandlordUnits() {
           try {
             const { error } = await supabase.from('units').delete().eq('id', id);
             if (error) throw error;
+            logAudit({
+              actorId: user?.id || '',
+              action: 'delete',
+              entityType: 'unit',
+              entityId: id,
+              description: 'Deleted unit',
+            });
             setUnits((prev) => prev.filter((u) => u.id !== id));
           } catch (err) {
             console.error('Delete unit error:', err);
@@ -122,6 +135,26 @@ export default function LandlordUnits() {
       return;
     }
 
+    if (status === 'occupied') {
+      const previous = editingId ? units.find((u) => u.id === editingId)?.status : 'vacant';
+      if (previous !== 'occupied') {
+        Alert.alert(
+          'Occupancy Note',
+          'Marking a unit occupied manually can be overwritten by active leases. Prefer assigning a lease so occupancy stays in sync.',
+          [
+            { text: 'Cancel', style: 'cancel' },
+            { text: 'Continue', onPress: () => void saveUnit(rent) },
+          ]
+        );
+        return;
+      }
+    }
+
+    await saveUnit(rent);
+  };
+
+  const saveUnit = async (rent: number) => {
+    if (!user?.id) return;
     try {
       setSubmitting(true);
       if (editingId) {

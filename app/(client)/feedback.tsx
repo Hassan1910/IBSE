@@ -14,6 +14,7 @@ import {
 } from 'react-native';
 import { supabase } from '../../lib/supabase';
 import { useUser } from '@clerk/clerk-expo';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Send, MessageSquare, AlertCircle, HelpCircle } from 'lucide-react-native';
 
 const FEEDBACK_TYPES = [
@@ -37,12 +38,15 @@ interface FeedbackItem {
 
 export default function FeedbackScreen() {
   const { user } = useUser();
+  const router = useRouter();
+  const { id: focusId } = useLocalSearchParams<{ id?: string }>();
   const [mode, setMode] = useState<ViewMode>('submit');
   const [feedbackType, setFeedbackType] = useState<FeedbackType>('inquiry');
   const [message, setMessage] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [history, setHistory] = useState<FeedbackItem[]>([]);
+  const [highlightedId, setHighlightedId] = useState<string | null>(null);
 
   const fetchHistory = useCallback(async () => {
     if (!user?.id) return;
@@ -62,6 +66,14 @@ export default function FeedbackScreen() {
       setLoadingHistory(false);
     }
   }, [user?.id]);
+
+  useEffect(() => {
+    if (focusId) {
+      setMode('history');
+      setHighlightedId(focusId);
+      router.setParams({ id: undefined });
+    }
+  }, [focusId, router]);
 
   useEffect(() => {
     if (mode === 'history') {
@@ -130,7 +142,7 @@ export default function FeedbackScreen() {
             onRefresh={fetchHistory}
             refreshing={loadingHistory}
             renderItem={({ item }) => (
-              <View style={styles.historyCard}>
+              <View style={[styles.historyCard, highlightedId === item.id && styles.highlightedCard]}>
                 <View style={styles.historyHeader}>
                   <Text style={styles.historyType}>{item.type.toUpperCase()}</Text>
                   <Text
@@ -408,6 +420,10 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     padding: 14,
     marginBottom: 10,
+  },
+  highlightedCard: {
+    borderColor: '#38BDF8',
+    borderWidth: 2,
   },
   historyHeader: {
     flexDirection: 'row',

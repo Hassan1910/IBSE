@@ -7,9 +7,9 @@ import { FileText, Link as LinkIcon, Receipt } from 'lucide-react-native';
 interface LeaseDocument {
   id: string;
   contract_url: string | null;
-  terms: string | null;
   start_date: string;
   end_date: string;
+  status: string;
   properties: { title: string };
 }
 
@@ -33,26 +33,35 @@ export default function TenantDocumentsScreen() {
 
       try {
         setLoading(true);
-        const [leaseRes, paymentRes] = await Promise.all([
-          supabase
-            .from('leases')
-            .select('id, contract_url, terms, start_date, end_date, properties ( title )')
-            .eq('tenant_id', user.id)
-            .eq('status', 'active')
-            .maybeSingle(),
-          supabase
+        const { data: leaseData, error: leaseError } = await supabase
+          .from('leases')
+          .select('id, contract_url, start_date, end_date, status, properties ( title )')
+          .eq('tenant_id', user.id)
+          .in('status', ['pending', 'active'])
+          .order('status', { ascending: true })
+          .order('start_date', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        if (leaseError) throw leaseError;
+
+        const currentLease = (leaseData as any) || null;
+        setLease(currentLease);
+
+        if (currentLease?.id) {
+          const { data: payments, error: paymentError } = await supabase
             .from('payments')
             .select('id, amount, payment_date, payment_method, reference_code')
             .eq('payer_id', user.id)
+            .eq('lease_id', currentLease.id)
             .eq('status', 'verified')
-            .order('payment_date', { ascending: false }),
-        ]);
+            .order('payment_date', { ascending: false });
 
-        if (leaseRes.error) throw leaseRes.error;
-        if (paymentRes.error) throw paymentRes.error;
-
-        setLease((leaseRes.data as any) || null);
-        setVerifiedPayments((paymentRes.data as any) || []);
+          if (paymentError) throw paymentError;
+          setVerifiedPayments((payments as any) || []);
+        } else {
+          setVerifiedPayments([]);
+        }
       } catch (err) {
         console.error('Fetch tenant documents error:', err);
         Alert.alert('Error', 'Failed to load your documents.');
@@ -65,12 +74,11 @@ export default function TenantDocumentsScreen() {
   }, [user?.id]);
 
   const openUrl = async (url: string) => {
-    const supported = await Linking.canOpenURL(url);
-    if (!supported) {
+    try {
+      await Linking.openURL(url);
+    } catch {
       Alert.alert('Cannot Open', 'This link is not valid.');
-      return;
     }
-    Linking.openURL(url);
   };
 
   const formatDate = (d: string) =>
@@ -92,7 +100,9 @@ export default function TenantDocumentsScreen() {
       <View style={styles.card}>
         <View style={styles.rowHeader}>
           <FileText size={16} color="#38BDF8" />
-          <Text style={styles.cardTitle}>Active Lease</Text>
+          <Text style={styles.cardTitle}>
+            {lease?.status === 'pending' ? 'Pending Lease' : 'Current Lease'}
+          </Text>
         </View>
         {lease ? (
           <>
@@ -108,21 +118,22 @@ export default function TenantDocumentsScreen() {
             </TouchableOpacity>
           </>
         ) : (
-          <Text style={styles.emptyText}>No active lease agreement found.</Text>
+          <Text style={styles.emptyText}>No pending or active lease found.</Text>
         )}
       </View>
 
-      <Text style={styles.sectionTitle}>Payment Receipts</Text>
+      <Text style={styles.sectionTitle}>Verified Payment Records</Text>
+      <Text style={styles.sectionHint}>These are payment records for your current lease, not downloadable PDF receipts.</Text>
       {verifiedPayments.length === 0 ? (
         <View style={styles.card}>
-          <Text style={styles.emptyText}>No verified payments yet.</Text>
+          <Text style={styles.emptyText}>No verified payments for this lease yet.</Text>
         </View>
       ) : (
         verifiedPayments.map((payment) => (
           <View key={payment.id} style={styles.card}>
             <View style={styles.rowHeader}>
               <Receipt size={16} color="#10B981" />
-              <Text style={styles.cardTitle}>Receipt #{payment.reference_code}</Text>
+              <Text style={styles.cardTitle}>Ref #{payment.reference_code}</Text>
             </View>
             <Text style={styles.metaText}>Amount: {formatPrice(payment.amount)}</Text>
             <Text style={styles.metaText}>Method: {payment.payment_method.toUpperCase()}</Text>
@@ -138,7 +149,8 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#0F172A' },
   content: { padding: 20, paddingBottom: 28 },
   centered: { flex: 1, backgroundColor: '#0F172A', justifyContent: 'center', alignItems: 'center' },
-  sectionTitle: { color: '#F8FAFC', fontSize: 17, fontWeight: 'bold', marginBottom: 10, marginTop: 8 },
+  sectionTitle: { color: '#F8FAFC', fontSize: 17, fontWeight: 'bold', marginBottom: 6, marginTop: 8 },
+  sectionHint: { color: '#64748B', fontSize: 12, marginBottom: 10, lineHeight: 17 },
   card: {
     backgroundColor: '#1E293B',
     borderRadius: 12,

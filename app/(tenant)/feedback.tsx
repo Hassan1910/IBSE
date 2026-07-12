@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { ActivityIndicator, Alert, FlatList, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useUser } from '@clerk/clerk-expo';
 import { supabase } from '../../lib/supabase';
 import { useAudit } from '../../hooks/useAudit';
@@ -27,12 +28,15 @@ interface FeedbackItem {
 export default function TenantFeedbackScreen() {
   const { user } = useUser();
   const { log } = useAudit();
+  const router = useRouter();
+  const { id: focusId } = useLocalSearchParams<{ id?: string }>();
   const [mode, setMode] = useState<ViewMode>('submit');
   const [feedbackType, setFeedbackType] = useState<FeedbackType>('inquiry');
   const [message, setMessage] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [history, setHistory] = useState<FeedbackItem[]>([]);
+  const [highlightedId, setHighlightedId] = useState<string | null>(null);
 
   const fetchHistory = useCallback(async () => {
     if (!user?.id) return;
@@ -52,6 +56,14 @@ export default function TenantFeedbackScreen() {
       setLoadingHistory(false);
     }
   }, [user?.id]);
+
+  useEffect(() => {
+    if (focusId) {
+      setMode('history');
+      setHighlightedId(focusId);
+      router.setParams({ id: undefined });
+    }
+  }, [focusId, router]);
 
   useEffect(() => {
     if (mode === 'history') {
@@ -146,7 +158,7 @@ export default function TenantFeedbackScreen() {
           onRefresh={fetchHistory}
           refreshing={loadingHistory}
           renderItem={({ item }) => (
-            <View style={styles.historyCard}>
+            <View style={[styles.historyCard, highlightedId === item.id && styles.highlightedCard]}>
               <View style={styles.historyHeader}>
                 <Text style={styles.historyType}>{item.type.toUpperCase()}</Text>
                 <Text style={[styles.statusPill, item.status === 'resolved' ? styles.statusResolved : styles.statusOpen]}>
@@ -207,6 +219,7 @@ const styles = StyleSheet.create({
   submitBtn: { backgroundColor: '#38BDF8', borderRadius: 8, alignItems: 'center', justifyContent: 'center', flexDirection: 'row', paddingVertical: 12 },
   submitBtnText: { color: '#0F172A', fontWeight: 'bold' },
   historyCard: { backgroundColor: '#1E293B', borderColor: '#334155', borderWidth: 1, borderRadius: 12, padding: 14, marginBottom: 10 },
+  highlightedCard: { borderColor: '#38BDF8', backgroundColor: 'rgba(56, 189, 248, 0.08)' },
   historyHeader: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 8 },
   historyType: { color: '#38BDF8', fontWeight: 'bold', fontSize: 12 },
   statusPill: { fontSize: 10, fontWeight: 'bold', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 4, overflow: 'hidden' },

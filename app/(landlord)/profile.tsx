@@ -50,6 +50,7 @@ export default function LandlordProfile() {
       setProfile(data);
     } catch (err) {
       console.error('Fetch profile error:', err);
+      Alert.alert('Error', 'Failed to load your profile.');
     } finally {
       setLoading(false);
     }

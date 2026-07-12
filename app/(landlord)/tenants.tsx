@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useCallback, useRef, useEffect } from 'react';
 import {
   View,
   Text,
@@ -11,10 +11,20 @@ import {
   Alert,
   ScrollView,
 } from 'react-native';
+import { useFocusEffect, useRouter } from 'expo-router';
 import { useUser } from '@clerk/clerk-expo';
 import { supabase } from '../../lib/supabase';
 import { logAudit } from '../../lib/audit';
-import { UserPlus, X, Mail, Phone, Home, Calendar, Users } from 'lucide-react-native';
+import {
+  fetchAssignableUnits,
+  hasOverlappingLease,
+  leaseAssignErrorMessage,
+  leaseTotalRent,
+  promoteClientToTenant,
+} from '../../lib/leases';
+import DatePickerModal from '../../components/DatePickerModal';
+import NotificationBell from '../../components/NotificationBell';
+import { UserPlus, X, Mail, Phone, Home, Calendar, Users, FilePlus, FileText } from 'lucide-react-native';
 
 interface LeaseRow {
   id: string;
@@ -22,7 +32,7 @@ interface LeaseRow {
   start_date: string;
   end_date: string;
   rent_amount: number;
-  status: 'active' | 'terminated' | 'expired';
+  status: 'pending' | 'active' | 'terminated' | 'expired';
   properties: { title: string } | null;
   profiles: { full_name: string; email: string; phone: string | null } | null;
 }
@@ -36,24 +46,71 @@ interface TenantGroup {
   activeCount: number;
 }
 
+interface OptionProfile {
+  id: string;
+  full_name: string;
+  email: string;
+  role: string;
+}
+
+interface OptionProperty {
+  id: string;
+  title: string;
+  price: number;
+}
+
+interface OptionUnit {
+  id: string;
+  unit_number: string;
+  rent_amount: number;
+}
+
+const todayISODate = () => {
+  const d = new Date();
+  const pad = (n: number) => n.toString().padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+};
+
 export default function LandlordTenants() {
   const { user } = useUser();
+  const router = useRouter();
   const [tenants, setTenants] = useState<TenantGroup[]>([]);
   const [loading, setLoading] = useState(true);
+  const hasLoadedRef = useRef(false);
 
-  const [inviteModalVisible, setInviteModalVisible] = useState(false);
-  const [inviteEmail, setInviteEmail] = useState('');
-  const [inviteName, setInviteName] = useState('');
-  const [submittingInvite, setSubmittingInvite] = useState(false);
+  const [createModalVisible, setCreateModalVisible] = useState(false);
+  const [newEmail, setNewEmail] = useState('');
+  const [newUsername, setNewUsername] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [submittingCreate, setSubmittingCreate] = useState(false);
 
-  const fetchTenants = useCallback(async () => {
+  // Assign lease
+  const [leaseModalVisible, setLeaseModalVisible] = useState(false);
+  const [allTenantProfiles, setAllTenantProfiles] = useState<OptionProfile[]>([]);
+  const [properties, setProperties] = useState<OptionProperty[]>([]);
+  const [units, setUnits] = useState<OptionUnit[]>([]);
+  const [selectedTenantId, setSelectedTenantId] = useState('');
+  const [selectedTenantName, setSelectedTenantName] = useState('');
+  const [selectedPropertyId, setSelectedPropertyId] = useState('');
+  const [selectedUnitId, setSelectedUnitId] = useState('');
+  const [startDate, setStartDate] = useState('');
+  const [endDate, setEndDate] = useState('');
+  const [rentAmount, setRentAmount] = useState('');
+  const [submittingLease, setSubmittingLease] = useState(false);
+  const [loadingLeaseOptions, setLoadingLeaseOptions] = useState(false);
+  const [lockTenantSelection, setLockTenantSelection] = useState(false);
+  const [startDatePickerVisible, setStartDatePickerVisible] = useState(false);
+  const [endDatePickerVisible, setEndDatePickerVisible] = useState(false);
+
+  const fetchTenants = useCallback(async (opts?: { silent?: boolean }) => {
     if (!user?.id) return;
     try {
-      setLoading(true);
+      if (!opts?.silent) setLoading(true);
       const { data, error } = await supabase
         .from('leases')
-        .select('id, tenant_id, start_date, end_date, rent_amount, status, properties ( title ), profiles:tenant_id ( full_name, email, phone )')
-        .eq('owner_id', user.id)
+        .select('id, tenant_id, start_date, end_date, rent_amount, status, properties!inner ( title, owner_id ), profiles:tenant_id ( full_name, email, phone )')
+        .eq('properties.owner_id', user.id)
         .order('start_date', { ascending: false });
 
       if (error) throw error;
@@ -74,51 +131,251 @@ export default function LandlordTenants() {
           groups.set(lease.tenant_id, group);
         }
         group.leases.push(lease);
-        if (lease.status === 'active') group.activeCount += 1;
+        if (lease.status === 'active' || lease.status === 'pending') group.activeCount += 1;
       }
       setTenants(Array.from(groups.values()));
     } catch (err) {
       console.error('Fetch tenants error:', err);
       Alert.alert('Error', 'Failed to load your tenants.');
     } finally {
+      hasLoadedRef.current = true;
       setLoading(false);
     }
   }, [user?.id]);
 
-  useEffect(() => {
-    fetchTenants();
-  }, [fetchTenants]);
+  // Tab screens stay mounted — refetch when focused after terminate elsewhere.
+  useFocusEffect(
+    useCallback(() => {
+      fetchTenants({ silent: hasLoadedRef.current });
+    }, [fetchTenants])
+  );
 
-  const handleInvite = async () => {
-    const email = inviteEmail.trim().toLowerCase();
+  const fetchLeaseOptions = useCallback(async () => {
+    if (!user?.id) return;
+    setLoadingLeaseOptions(true);
+    try {
+      const [{ data: profs }, { data: props }] = await Promise.all([
+        supabase
+          .from('profiles')
+          .select('id, full_name, email, role')
+          .in('role', ['tenant', 'client'])
+          .order('full_name', { ascending: true }),
+        supabase
+          .from('properties')
+          .select('id, title, price')
+          .eq('type', 'rental')
+          .eq('owner_id', user.id)
+          .order('title', { ascending: true }),
+      ]);
+      setAllTenantProfiles((profs as OptionProfile[]) || []);
+      setProperties((props as OptionProperty[]) || []);
+    } catch (err) {
+      console.error('Fetch lease options error:', err);
+      Alert.alert('Error', 'Failed to load lease options.');
+    } finally {
+      setLoadingLeaseOptions(false);
+    }
+  }, [user?.id]);
+
+  useEffect(() => {
+    if (!selectedPropertyId) {
+      setUnits([]);
+      return;
+    }
+    (async () => {
+      try {
+        const units = await fetchAssignableUnits(selectedPropertyId);
+        setUnits(units);
+      } catch (err) {
+        console.error('Fetch assignable units error:', err);
+        setUnits([]);
+      }
+    })();
+  }, [selectedPropertyId]);
+
+  const resetLeaseForm = () => {
+    setSelectedTenantId('');
+    setSelectedTenantName('');
+    setSelectedPropertyId('');
+    setSelectedUnitId('');
+    setStartDate(todayISODate());
+    setEndDate('');
+    setRentAmount('');
+    setLockTenantSelection(false);
+  };
+
+  const openAssignLease = async (opts?: { tenantId?: string; tenantName?: string }) => {
+    resetLeaseForm();
+    if (opts?.tenantId) {
+      setSelectedTenantId(opts.tenantId);
+      setSelectedTenantName(opts.tenantName || '');
+      setLockTenantSelection(true);
+    }
+    setLeaseModalVisible(true);
+    await fetchLeaseOptions();
+  };
+
+  const handleCreateTenant = async () => {
+    const email = newEmail.trim().toLowerCase();
+    const username = newUsername.trim();
+
     if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
       Alert.alert('Validation Error', 'Please enter a valid email address.');
       return;
     }
-    try {
-      setSubmittingInvite(true);
-      const { error } = await supabase.from('user_invites').upsert(
-        {
-          email,
-          full_name: inviteName.trim() || null,
-          role: 'tenant',
-          status: 'pending',
-          invited_by: user?.id ?? null,
-        },
-        { onConflict: 'email' },
-      );
-      if (error) throw error;
+    if (!username) {
+      Alert.alert('Validation Error', 'Please enter a username.');
+      return;
+    }
+    if (newPassword.length < 8) {
+      Alert.alert('Validation Error', 'Password must be at least 8 characters.');
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      Alert.alert('Validation Error', 'Passwords do not match.');
+      return;
+    }
 
-      logAudit({ actorId: user?.id || '', action: 'create', entityType: 'user_invite', description: `Invited tenant ${email}` });
-      Alert.alert('Tenant Invited', `${email} is pre-registered as a tenant. When they sign up with this email, the role is applied automatically.`);
-      setInviteModalVisible(false);
-      setInviteEmail('');
-      setInviteName('');
-    } catch (err) {
-      console.error('Invite tenant error:', err);
-      Alert.alert('Error', 'Failed to create the tenant invite.');
+    try {
+      setSubmittingCreate(true);
+
+      const { data, error } = await supabase.functions.invoke('admin-create-user', {
+        body: { email, username, role: 'tenant', password: newPassword },
+      });
+
+      if (error) {
+        let message = 'Failed to create the tenant account.';
+        try {
+          const ctx = (error as any).context;
+          if (ctx && typeof ctx.json === 'function') {
+            const parsed = await ctx.json();
+            if (parsed?.error) message = parsed.error;
+          }
+        } catch {
+          // Ignore parse errors and fall back to the generic message.
+        }
+        Alert.alert('Error', message);
+        return;
+      }
+      if (data?.error) {
+        Alert.alert('Error', data.error);
+        return;
+      }
+
+      logAudit({
+        actorId: user?.id || '',
+        action: 'create',
+        entityType: 'user',
+        entityId: data?.userId,
+        description: `Created tenant account for ${email}`,
+      });
+
+      const createdUserId = data?.userId as string | undefined;
+      setCreateModalVisible(false);
+      setNewEmail('');
+      setNewUsername('');
+      setNewPassword('');
+      setConfirmPassword('');
+
+      Alert.alert(
+        'Tenant Account Created',
+        `An account for ${email} was created. Share the login credentials with the tenant.\n\nAssign a lease now to link them to a property?`,
+        [
+          { text: 'Later', style: 'cancel' },
+          {
+            text: 'Assign Lease',
+            onPress: () => {
+              if (createdUserId) {
+                openAssignLease({ tenantId: createdUserId, tenantName: username });
+              } else {
+                openAssignLease();
+              }
+            },
+          },
+        ]
+      );
+    } catch (err: any) {
+      console.error('Create tenant error:', err);
+      Alert.alert('Error', err?.message || 'Failed to create the tenant account.');
     } finally {
-      setSubmittingInvite(false);
+      setSubmittingCreate(false);
+    }
+  };
+
+  const handleAssignLease = async () => {
+    if (!selectedTenantId || !selectedPropertyId || !startDate || !endDate || !rentAmount) {
+      Alert.alert('Validation Error', 'Please select a tenant, property, dates and rent amount.');
+      return;
+    }
+    const rent = parseFloat(rentAmount);
+    if (isNaN(rent) || rent <= 0) {
+      Alert.alert('Validation Error', 'Please enter a valid rent amount.');
+      return;
+    }
+    if (!user?.id) {
+      Alert.alert('Error', 'Could not determine your account.');
+      return;
+    }
+
+    if (endDate < startDate) {
+      Alert.alert('Validation Error', 'End date must be on or after the start date.');
+      return;
+    }
+
+    try {
+      setSubmittingLease(true);
+
+      const overlaps = await hasOverlappingLease({
+        propertyId: selectedPropertyId,
+        unitId: selectedUnitId || null,
+        startDate,
+        endDate,
+      });
+      if (overlaps) {
+        Alert.alert(
+          'Space Unavailable',
+          'This space already has a pending or active lease for overlapping dates. Terminate or renew the existing agreement instead.'
+        );
+        return;
+      }
+
+      const { error: leaseError } = await supabase.from('leases').insert({
+        property_id: selectedPropertyId,
+        unit_id: selectedUnitId || null,
+        tenant_id: selectedTenantId,
+        owner_id: user.id,
+        start_date: startDate,
+        end_date: endDate,
+        rent_amount: rent,
+        status: 'pending',
+      });
+      if (leaseError) throw leaseError;
+
+      // Promote client → tenant when allocating a lease.
+      // Unit/property occupancy flips to rented when the first payment is verified.
+      const profile = allTenantProfiles.find((p) => p.id === selectedTenantId);
+      await promoteClientToTenant(selectedTenantId, profile?.role);
+
+      logAudit({
+        actorId: user.id,
+        action: 'create',
+        entityType: 'lease',
+        entityId: selectedTenantId,
+        description: `Assigned pending lease to ${selectedTenantName || profile?.full_name || selectedTenantId}`,
+      });
+
+      Alert.alert(
+        'Lease Assigned',
+        'Agreement is pending payment. It becomes active after the tenant pays and you verify the payment.'
+      );
+      setLeaseModalVisible(false);
+      resetLeaseForm();
+      fetchTenants();
+    } catch (err) {
+      console.error('Assign lease error:', err);
+      Alert.alert('Error', leaseAssignErrorMessage(err));
+    } finally {
+      setSubmittingLease(false);
     }
   };
 
@@ -129,6 +386,10 @@ export default function LandlordTenants() {
 
   return (
     <View style={styles.container}>
+      <View style={styles.topBar}>
+        <Text style={styles.topBarTitle}>Tenants</Text>
+        <NotificationBell href="/(landlord)/notifications" />
+      </View>
       {loading ? (
         <View style={styles.centered}>
           <ActivityIndicator size="large" color="#38BDF8" />
@@ -138,12 +399,31 @@ export default function LandlordTenants() {
           <FlatList
             data={tenants}
             keyExtractor={(item) => item.tenantId}
+            ListHeaderComponent={
+              <TouchableOpacity
+                style={styles.manageLink}
+                onPress={() => router.push('/(landlord)/agreements')}
+              >
+                <FileText size={16} color="#38BDF8" style={{ marginRight: 8 }} />
+                <Text style={styles.manageLinkText}>Manage all rental agreements</Text>
+              </TouchableOpacity>
+            }
             renderItem={({ item }) => (
               <View style={styles.card}>
                 <View style={styles.cardHeader}>
                   <Text style={styles.name}>{item.fullName}</Text>
-                  <View style={styles.badge}>
-                    <Text style={styles.badgeText}>{item.activeCount} ACTIVE</Text>
+                  <View style={[styles.badge, item.activeCount === 0 && styles.badgeInactive]}>
+                    <Text style={[styles.badgeText, item.activeCount === 0 && styles.badgeTextInactive]}>
+                      {(() => {
+                        const active = item.leases.filter((l) => l.status === 'active').length;
+                        const pending = item.leases.filter((l) => l.status === 'pending').length;
+                        if (active === 0 && pending === 0) return 'INACTIVE';
+                        const parts: string[] = [];
+                        if (active > 0) parts.push(`${active} ACTIVE`);
+                        if (pending > 0) parts.push(`${pending} PENDING`);
+                        return parts.join(' · ');
+                      })()}
+                    </Text>
                   </View>
                 </View>
 
@@ -171,18 +451,37 @@ export default function LandlordTenants() {
                       </View>
                     </View>
                     <View style={{ alignItems: 'flex-end' }}>
-                      <Text style={styles.historyRent}>{formatPrice(l.rent_amount)}</Text>
+                      <Text style={styles.historyRent}>
+                        {formatPrice(leaseTotalRent(l.rent_amount, l.start_date, l.end_date))}
+                      </Text>
                       <Text
                         style={[
                           styles.historyStatus,
-                          { color: l.status === 'active' ? '#10B981' : l.status === 'expired' ? '#EAB308' : '#EF4444' },
+                          {
+                            color:
+                              l.status === 'active'
+                                ? '#10B981'
+                                : l.status === 'pending'
+                                  ? '#EAB308'
+                                  : l.status === 'expired'
+                                    ? '#94A3B8'
+                                    : '#EF4444',
+                          },
                         ]}
                       >
-                        {l.status.toUpperCase()}
+                        {l.status === 'pending' ? 'PENDING PAYMENT' : l.status.toUpperCase()}
                       </Text>
                     </View>
                   </View>
                 ))}
+
+                <TouchableOpacity
+                  style={styles.assignBtn}
+                  onPress={() => openAssignLease({ tenantId: item.tenantId, tenantName: item.fullName })}
+                >
+                  <FilePlus size={14} color="#0F172A" style={{ marginRight: 6 }} />
+                  <Text style={styles.assignBtnText}>Assign Lease</Text>
+                </TouchableOpacity>
               </View>
             )}
             contentContainerStyle={styles.listContainer}
@@ -191,23 +490,33 @@ export default function LandlordTenants() {
             ListEmptyComponent={
               <View style={styles.emptyCentered}>
                 <Users size={48} color="#94A3B8" style={styles.emptyIcon} />
-                <Text style={styles.emptyText}>No tenants yet. Create a rental agreement to add tenants.</Text>
+                <Text style={styles.emptyText}>
+                  No tenants yet. Create a tenant account, then assign a lease to link them to a property.
+                </Text>
+                <TouchableOpacity style={styles.emptyAssignBtn} onPress={() => openAssignLease()}>
+                  <Text style={styles.assignBtnText}>Assign Lease</Text>
+                </TouchableOpacity>
               </View>
             }
           />
 
-          <TouchableOpacity style={styles.fab} onPress={() => setInviteModalVisible(true)}>
-            <UserPlus size={24} color="#0F172A" />
-          </TouchableOpacity>
+          <View style={styles.fabColumn}>
+            <TouchableOpacity style={[styles.fab, styles.fabSecondary]} onPress={() => openAssignLease()}>
+              <FilePlus size={22} color="#F8FAFC" />
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.fab} onPress={() => setCreateModalVisible(true)}>
+              <UserPlus size={24} color="#0F172A" />
+            </TouchableOpacity>
+          </View>
         </>
       )}
 
-      <Modal animationType="slide" transparent visible={inviteModalVisible} onRequestClose={() => setInviteModalVisible(false)}>
+      <Modal animationType="slide" transparent visible={createModalVisible} onRequestClose={() => setCreateModalVisible(false)}>
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
             <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>Invite Tenant</Text>
-              <TouchableOpacity onPress={() => setInviteModalVisible(false)}>
+              <Text style={styles.modalTitle}>Create Tenant Account</Text>
+              <TouchableOpacity onPress={() => setCreateModalVisible(false)}>
                 <X size={24} color="#94A3B8" />
               </TouchableOpacity>
             </View>
@@ -216,7 +525,8 @@ export default function LandlordTenants() {
               <View style={styles.inviteNote}>
                 <Mail size={16} color="#38BDF8" style={{ marginRight: 8 }} />
                 <Text style={styles.inviteNoteText}>
-                  Pre-register a tenant by email. When they sign up with this email, they are automatically assigned the tenant role.
+                  Create a complete login account. The tenant signs in with the email and password you set
+                  here, and can change their password later from their profile.
                 </Text>
               </View>
 
@@ -226,43 +536,274 @@ export default function LandlordTenants() {
                   style={styles.modalInput}
                   placeholder="name@domain.com"
                   placeholderTextColor="#999"
-                  value={inviteEmail}
-                  onChangeText={setInviteEmail}
+                  value={newEmail}
+                  onChangeText={setNewEmail}
                   autoCapitalize="none"
                   keyboardType="email-address"
                 />
               </View>
 
               <View style={styles.inputGroup}>
-                <Text style={styles.label}>Full Name (optional)</Text>
+                <Text style={styles.label}>Username</Text>
                 <TextInput
                   style={styles.modalInput}
                   placeholder="e.g. Jane Doe"
                   placeholderTextColor="#999"
-                  value={inviteName}
-                  onChangeText={setInviteName}
+                  value={newUsername}
+                  onChangeText={setNewUsername}
                   autoCapitalize="words"
                 />
               </View>
 
-              <TouchableOpacity style={styles.submitBtn} onPress={handleInvite} disabled={submittingInvite}>
-                {submittingInvite ? (
+              <View style={styles.inputGroup}>
+                <Text style={styles.label}>Password</Text>
+                <TextInput
+                  style={styles.modalInput}
+                  placeholder="At least 8 characters"
+                  placeholderTextColor="#999"
+                  value={newPassword}
+                  onChangeText={setNewPassword}
+                  secureTextEntry
+                  autoCapitalize="none"
+                />
+              </View>
+
+              <View style={styles.inputGroup}>
+                <Text style={styles.label}>Confirm Password</Text>
+                <TextInput
+                  style={styles.modalInput}
+                  placeholder="Re-enter the password"
+                  placeholderTextColor="#999"
+                  value={confirmPassword}
+                  onChangeText={setConfirmPassword}
+                  secureTextEntry
+                  autoCapitalize="none"
+                />
+              </View>
+
+              <TouchableOpacity style={styles.submitBtn} onPress={handleCreateTenant} disabled={submittingCreate}>
+                {submittingCreate ? (
                   <ActivityIndicator color="#0F172A" />
                 ) : (
-                  <Text style={styles.submitBtnText}>Send Invite</Text>
+                  <Text style={styles.submitBtnText}>Create Account</Text>
                 )}
               </TouchableOpacity>
             </ScrollView>
           </View>
         </View>
       </Modal>
+
+      <Modal
+        animationType="slide"
+        transparent
+        visible={leaseModalVisible}
+        onRequestClose={() => setLeaseModalVisible(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Assign Lease</Text>
+              <TouchableOpacity onPress={() => setLeaseModalVisible(false)}>
+                <X size={24} color="#94A3B8" />
+              </TouchableOpacity>
+            </View>
+
+            <ScrollView contentContainerStyle={styles.modalBody} showsVerticalScrollIndicator={false}>
+              {loadingLeaseOptions ? (
+                <ActivityIndicator color="#38BDF8" style={{ marginVertical: 24 }} />
+              ) : (
+                <>
+                  <View style={styles.inputGroup}>
+                    <Text style={styles.label}>Tenant</Text>
+                    {lockTenantSelection && selectedTenantId ? (
+                      <Text style={styles.modalSubText}>
+                        {selectedTenantName ||
+                          allTenantProfiles.find((p) => p.id === selectedTenantId)?.full_name ||
+                          'Selected tenant'}
+                      </Text>
+                    ) : allTenantProfiles.length === 0 ? (
+                      <Text style={styles.errorText}>No tenants found. Create a tenant account first.</Text>
+                    ) : (
+                      allTenantProfiles.map((t) => (
+                        <TouchableOpacity
+                          key={t.id}
+                          style={[styles.optionBtn, selectedTenantId === t.id && styles.optionBtnActive]}
+                          onPress={() => {
+                            setSelectedTenantId(t.id);
+                            setSelectedTenantName(t.full_name);
+                          }}
+                        >
+                          <Text
+                            style={[styles.optionText, selectedTenantId === t.id && styles.optionTextActive]}
+                          >
+                            {t.full_name} ({t.role})
+                          </Text>
+                        </TouchableOpacity>
+                      ))
+                    )}
+                  </View>
+
+                  <View style={styles.inputGroup}>
+                    <Text style={styles.label}>Property</Text>
+                    {properties.length === 0 ? (
+                      <Text style={styles.errorText}>No rental properties found. Add one first.</Text>
+                    ) : (
+                      properties.map((p) => (
+                        <TouchableOpacity
+                          key={p.id}
+                          style={[styles.optionBtn, selectedPropertyId === p.id && styles.optionBtnActive]}
+                          onPress={() => {
+                            setSelectedPropertyId(p.id);
+                            setSelectedUnitId('');
+                            setRentAmount(p.price.toString());
+                          }}
+                        >
+                          <Text
+                            style={[
+                              styles.optionText,
+                              selectedPropertyId === p.id && styles.optionTextActive,
+                            ]}
+                          >
+                            {p.title} ({formatPrice(p.price)})
+                          </Text>
+                        </TouchableOpacity>
+                      ))
+                    )}
+                  </View>
+
+                  {selectedPropertyId && units.length > 0 ? (
+                    <View style={styles.inputGroup}>
+                      <Text style={styles.label}>Unit (optional)</Text>
+                      {units.map((u) => (
+                        <TouchableOpacity
+                          key={u.id}
+                          style={[styles.optionBtn, selectedUnitId === u.id && styles.optionBtnActive]}
+                          onPress={() => {
+                            setSelectedUnitId(u.id);
+                            setRentAmount(u.rent_amount.toString());
+                          }}
+                        >
+                          <Text
+                            style={[styles.optionText, selectedUnitId === u.id && styles.optionTextActive]}
+                          >
+                            Unit {u.unit_number} ({formatPrice(u.rent_amount)})
+                          </Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  ) : null}
+
+                  <View style={styles.inputGroup}>
+                    <Text style={styles.label}>Start Date</Text>
+                    <View style={styles.dateInputContainer}>
+                      <TextInput
+                        style={[styles.modalInput, { flex: 1 }]}
+                        placeholder="YYYY-MM-DD"
+                        placeholderTextColor="#999"
+                        value={startDate}
+                        onChangeText={setStartDate}
+                      />
+                      <TouchableOpacity
+                        style={styles.calendarIconBtn}
+                        onPress={() => setStartDatePickerVisible(true)}
+                      >
+                        <Calendar size={20} color="#38BDF8" />
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+
+                  <View style={styles.inputGroup}>
+                    <Text style={styles.label}>End Date</Text>
+                    <View style={styles.dateInputContainer}>
+                      <TextInput
+                        style={[styles.modalInput, { flex: 1 }]}
+                        placeholder="YYYY-MM-DD"
+                        placeholderTextColor="#999"
+                        value={endDate}
+                        onChangeText={setEndDate}
+                      />
+                      <TouchableOpacity
+                        style={styles.calendarIconBtn}
+                        onPress={() => setEndDatePickerVisible(true)}
+                      >
+                        <Calendar size={20} color="#38BDF8" />
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+
+                  <View style={styles.inputGroup}>
+                    <Text style={styles.label}>Rent Amount (KES/month)</Text>
+                    <TextInput
+                      style={styles.modalInput}
+                      placeholder="e.g. 25000"
+                      placeholderTextColor="#999"
+                      value={rentAmount}
+                      onChangeText={setRentAmount}
+                      keyboardType="numeric"
+                    />
+                  </View>
+
+                  <TouchableOpacity
+                    style={styles.submitBtn}
+                    onPress={handleAssignLease}
+                    disabled={submittingLease || properties.length === 0}
+                  >
+                    {submittingLease ? (
+                      <ActivityIndicator color="#0F172A" />
+                    ) : (
+                      <Text style={styles.submitBtnText}>Assign Lease</Text>
+                    )}
+                  </TouchableOpacity>
+                </>
+              )}
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
+
+      <DatePickerModal
+        visible={startDatePickerVisible}
+        onClose={() => setStartDatePickerVisible(false)}
+        value={startDate}
+        onChange={setStartDate}
+        title="Select Start Date"
+      />
+
+      <DatePickerModal
+        visible={endDatePickerVisible}
+        onClose={() => setEndDatePickerVisible(false)}
+        value={endDate}
+        onChange={setEndDate}
+        title="Select End Date"
+      />
     </View>
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#0F172A' },
+  topBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    paddingTop: 12,
+    paddingBottom: 4,
+  },
+  topBarTitle: { fontSize: 18, fontWeight: 'bold', color: '#F8FAFC', flex: 1, marginRight: 12 },
   listContainer: { padding: 16, flexGrow: 1 },
+  manageLink: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(56, 189, 248, 0.08)',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#334155',
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    marginBottom: 16,
+  },
+  manageLinkText: { color: '#38BDF8', fontSize: 14, fontWeight: '600' },
   card: {
     backgroundColor: '#1E293B',
     borderRadius: 12,
@@ -281,7 +822,12 @@ const styles = StyleSheet.create({
     paddingVertical: 3,
     borderRadius: 6,
   },
+  badgeInactive: {
+    backgroundColor: 'rgba(148, 163, 184, 0.15)',
+    borderColor: '#94A3B8',
+  },
   badgeText: { color: '#10B981', fontSize: 10, fontWeight: 'bold' },
+  badgeTextInactive: { color: '#94A3B8' },
   infoRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 6 },
   icon: { marginRight: 8 },
   infoText: { color: '#94A3B8', fontSize: 13 },
@@ -293,10 +839,31 @@ const styles = StyleSheet.create({
   historyDate: { color: '#64748B', fontSize: 11 },
   historyRent: { color: '#38BDF8', fontSize: 13, fontWeight: 'bold' },
   historyStatus: { fontSize: 10, fontWeight: 'bold', marginTop: 2 },
-  fab: {
+  assignBtn: {
+    marginTop: 8,
+    backgroundColor: '#38BDF8',
+    borderRadius: 8,
+    paddingVertical: 10,
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'center',
+  },
+  assignBtnText: { color: '#0F172A', fontWeight: 'bold', fontSize: 13 },
+  emptyAssignBtn: {
+    marginTop: 16,
+    backgroundColor: '#38BDF8',
+    borderRadius: 8,
+    paddingVertical: 12,
+    paddingHorizontal: 20,
+  },
+  fabColumn: {
     position: 'absolute',
     bottom: 24,
     right: 24,
+    alignItems: 'center',
+    gap: 12,
+  },
+  fab: {
     width: 56,
     height: 56,
     borderRadius: 28,
@@ -308,6 +875,13 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.4,
     shadowRadius: 6,
     elevation: 8,
+  },
+  fabSecondary: {
+    backgroundColor: '#1E293B',
+    borderWidth: 1,
+    borderColor: '#38BDF8',
+    shadowColor: '#000',
+    shadowOpacity: 0.3,
   },
   centered: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   emptyCentered: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 24, marginTop: 60 },
@@ -331,6 +905,7 @@ const styles = StyleSheet.create({
     marginBottom: 20,
   },
   modalTitle: { fontSize: 18, fontWeight: 'bold', color: '#F8FAFC' },
+  modalSubText: { color: '#F8FAFC', fontSize: 15, fontWeight: '600', marginBottom: 4 },
   modalBody: { paddingBottom: 20 },
   inviteNote: {
     flexDirection: 'row',
@@ -353,6 +928,33 @@ const styles = StyleSheet.create({
     color: '#F8FAFC',
     fontSize: 15,
   },
+  dateInputContainer: {
+    flexDirection: 'row',
+    alignItems: 'stretch',
+  },
+  calendarIconBtn: {
+    backgroundColor: '#0F172A',
+    borderColor: '#334155',
+    borderWidth: 1,
+    borderRadius: 8,
+    paddingHorizontal: 14,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginLeft: 8,
+  },
+  optionBtn: {
+    backgroundColor: '#0F172A',
+    borderWidth: 1,
+    borderColor: '#334155',
+    borderRadius: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    marginBottom: 8,
+  },
+  optionBtnActive: { borderColor: '#38BDF8', backgroundColor: 'rgba(56, 189, 248, 0.12)' },
+  optionText: { color: '#94A3B8', fontSize: 14 },
+  optionTextActive: { color: '#38BDF8', fontWeight: '600' },
+  errorText: { color: '#F87171', fontSize: 13, lineHeight: 18 },
   submitBtn: { backgroundColor: '#38BDF8', borderRadius: 8, paddingVertical: 14, alignItems: 'center', marginTop: 10 },
   submitBtnText: { color: '#0F172A', fontWeight: 'bold', fontSize: 16 },
 });

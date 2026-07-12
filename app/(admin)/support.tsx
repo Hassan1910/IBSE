@@ -12,6 +12,7 @@ import {
 } from 'react-native';
 import { supabase } from '../../lib/supabase';
 import { useUser } from '@clerk/clerk-expo';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useAudit } from '../../hooks/useAudit';
 import { notifyUser } from '../../lib/notifications';
 import { X, MessageSquare, Reply, CheckCircle, Trash2, Inbox } from 'lucide-react-native';
@@ -33,6 +34,8 @@ type Filter = 'open' | 'resolved' | 'all';
 export default function AdminSupportScreen() {
   const { user } = useUser();
   const { log } = useAudit();
+  const router = useRouter();
+  const { id: focusId } = useLocalSearchParams<{ id?: string }>();
 
   const [feedback, setFeedback] = useState<Feedback[]>([]);
   const [loading, setLoading] = useState(true);
@@ -63,6 +66,15 @@ export default function AdminSupportScreen() {
   useEffect(() => {
     fetchFeedback();
   }, [fetchFeedback]);
+
+  useEffect(() => {
+    if (!focusId || loading) return;
+    const match = feedback.find((f) => f.id === focusId);
+    if (!match) return;
+    setFilter(match.status === 'resolved' ? 'resolved' : 'open');
+    openReply(match);
+    router.setParams({ id: undefined });
+  }, [focusId, loading, feedback, router]);
 
   const visible = feedback.filter((f) => (filter === 'all' ? true : f.status === filter));
 

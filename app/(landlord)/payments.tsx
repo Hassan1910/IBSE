@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View,
   Text,
@@ -8,39 +8,74 @@ import {
   ActivityIndicator,
   Alert,
 } from 'react-native';
+import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import { supabase } from '../../lib/supabase';
 import { useUser } from '@clerk/clerk-expo';
 import { logAudit } from '../../lib/audit';
+import { notifyUser } from '../../lib/notifications';
 import { CreditCard, User as UserIcon, Check, X, Bell, Wallet } from 'lucide-react-native';
+import NotificationBell from '../../components/NotificationBell';
 
 interface Payment {
   id: string;
+  payer_id: string;
   amount: number;
   payment_method: string;
   reference_code: string;
   payment_date: string;
   status: 'pending' | 'verified' | 'failed';
   profiles: { full_name: string; email: string } | null;
-  leases: { end_date: string; properties: { title: string } | null } | null;
+  leases: { properties: { title: string } | null } | null;
 }
 
 type Filter = 'pending' | 'verified' | 'all';
 
 export default function LandlordPayments() {
   const { user } = useUser();
+  const router = useRouter();
+  const { id: focusId } = useLocalSearchParams<{ id?: string }>();
   const [payments, setPayments] = useState<Payment[]>([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<Filter>('pending');
   const [totals, setTotals] = useState({ collected: 0, pending: 0 });
+  const [highlightedId, setHighlightedId] = useState<string | null>(null);
+  const listRef = useRef<FlatList<Payment>>(null);
 
   const fetchPayments = useCallback(async () => {
     if (!user?.id) return;
     try {
       setLoading(true);
+
+      const { data: ownedProps, error: propsError } = await supabase
+        .from('properties')
+        .select('id')
+        .eq('owner_id', user.id);
+      if (propsError) throw propsError;
+
+      const propIds = (ownedProps || []).map((p) => p.id);
+      if (propIds.length === 0) {
+        setPayments([]);
+        setTotals({ collected: 0, pending: 0 });
+        return;
+      }
+
+      const { data: ownedLeases, error: leasesError } = await supabase
+        .from('leases')
+        .select('id')
+        .in('property_id', propIds);
+      if (leasesError) throw leasesError;
+
+      const leaseIds = (ownedLeases || []).map((l) => l.id);
+      if (leaseIds.length === 0) {
+        setPayments([]);
+        setTotals({ collected: 0, pending: 0 });
+        return;
+      }
+
       const { data, error } = await supabase
         .from('payments')
-        .select('id, amount, payment_method, reference_code, payment_date, status, profiles:payer_id ( full_name, email ), leases!inner ( owner_id, end_date, properties ( title ) )')
-        .eq('leases.owner_id', user.id)
+        .select('id, payer_id, amount, payment_method, reference_code, payment_date, status, profiles:payer_id ( full_name, email ), leases ( properties ( title ) )')
+        .in('lease_id', leaseIds)
         .order('payment_date', { ascending: false });
       if (error) throw error;
       const rows = (data as any as Payment[]) || [];
@@ -61,12 +96,55 @@ export default function LandlordPayments() {
     fetchPayments();
   }, [fetchPayments]);
 
+  useFocusEffect(
+    useCallback(() => {
+      fetchPayments();
+    }, [fetchPayments])
+  );
+
+  useEffect(() => {
+    if (!focusId || loading) return;
+    const match = payments.find((p) => p.id === focusId);
+    if (!match) return;
+    const nextFilter: Filter = match.status === 'verified' || match.status === 'failed' ? 'all' : 'pending';
+    setFilter(nextFilter);
+    setHighlightedId(match.id);
+    router.setParams({ id: undefined });
+
+    const visible = payments.filter((p) => (nextFilter === 'all' ? true : p.status === nextFilter));
+    const index = visible.findIndex((p) => p.id === match.id);
+    if (index >= 0) {
+      requestAnimationFrame(() => {
+        listRef.current?.scrollToIndex({ index, animated: true, viewPosition: 0.1 });
+      });
+    }
+  }, [focusId, loading, payments, router]);
+
   const handleVerify = async (id: string, action: 'verified' | 'failed') => {
     try {
+      const current = payments.find((p) => p.id === id);
       const { error } = await supabase.from('payments').update({ status: action }).eq('id', id);
       if (error) throw error;
       logAudit({ actorId: user?.id || '', action: 'update', entityType: 'payment', entityId: id, description: `Payment marked ${action}` });
-      Alert.alert('Success', `Payment marked as ${action === 'verified' ? 'verified' : 'failed'}.`);
+      if (current?.payer_id) {
+        await notifyUser({
+          userId: current.payer_id,
+          type: 'payment_confirmed',
+          title: action === 'verified' ? 'Payment Verified' : 'Payment Rejected',
+          body:
+            action === 'verified'
+              ? `Your payment reference ${current.reference_code} has been verified.`
+              : `Your payment reference ${current.reference_code} was marked as failed. Please resubmit.`,
+          entityType: 'payment',
+          entityId: current.id,
+        });
+      }
+      Alert.alert(
+        'Success',
+        action === 'verified'
+          ? 'Payment verified. If this was the first payment on a pending lease, the lease is now active.'
+          : 'Payment marked as failed.'
+      );
       fetchPayments();
     } catch (err) {
       console.error('Verify payment error:', err);
@@ -82,9 +160,22 @@ export default function LandlordPayments() {
         { text: 'Cancel', style: 'cancel' },
         {
           text: 'Send',
-          onPress: () => {
-            logAudit({ actorId: user?.id || '', action: 'notify', entityType: 'payment', entityId: p.id, description: 'Sent payment reminder' });
-            Alert.alert('Reminder Sent', 'The tenant has been reminded about this payment.');
+          onPress: async () => {
+            try {
+              await notifyUser({
+                userId: p.payer_id,
+                type: 'rent_due',
+                title: 'Rent Reminder',
+                body: `Please pay your rent of ${formatPrice(p.amount)}. Reference: ${p.reference_code || 'N/A'}.`,
+                entityType: 'payment',
+                entityId: p.id,
+              });
+              logAudit({ actorId: user?.id || '', action: 'notify', entityType: 'payment', entityId: p.id, description: 'Sent payment reminder' });
+              Alert.alert('Reminder Sent', 'The tenant has been reminded about this payment.');
+            } catch (err) {
+              console.error('Send reminder error:', err);
+              Alert.alert('Error', 'Failed to send payment reminder.');
+            }
           },
         },
       ],
@@ -96,15 +187,16 @@ export default function LandlordPayments() {
   const formatDate = (d: string) =>
     new Date(d).toLocaleDateString('en-KE', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 
-  const isOverdue = (p: Payment) =>
-    p.status === 'pending' && p.leases?.end_date && new Date(p.leases.end_date) < new Date();
-
   const filtered = payments.filter((p) => (filter === 'all' ? true : p.status === filter));
 
   const statusColor = (s: string) => (s === 'verified' ? '#10B981' : s === 'pending' ? '#EAB308' : '#EF4444');
 
   const renderHeader = () => (
     <View>
+      <View style={styles.topBar}>
+        <Text style={styles.topBarTitle}>Payments</Text>
+        <NotificationBell href="/(landlord)/notifications" />
+      </View>
       <View style={styles.totalsRow}>
         <View style={[styles.totalCard, { marginRight: 12 }]}>
           <Wallet size={18} color="#10B981" />
@@ -140,11 +232,18 @@ export default function LandlordPayments() {
         </View>
       ) : (
         <FlatList
+          ref={listRef}
           data={filtered}
           keyExtractor={(item) => item.id}
           ListHeaderComponent={renderHeader}
+          onScrollToIndexFailed={(info) => {
+            listRef.current?.scrollToOffset({
+              offset: info.averageItemLength * info.index,
+              animated: true,
+            });
+          }}
           renderItem={({ item }) => (
-            <View style={styles.card}>
+            <View style={[styles.card, highlightedId === item.id && styles.highlightedCard]}>
               <View style={styles.cardHeader}>
                 <Text style={styles.propTitle}>{item.leases?.properties?.title || 'Rent Payment'}</Text>
                 <View style={[styles.badge, { borderColor: statusColor(item.status) }]}>
@@ -156,8 +255,6 @@ export default function LandlordPayments() {
               <Text style={styles.refCode}>
                 {item.payment_method.toUpperCase()} • Ref: <Text style={styles.boldText}>{item.reference_code}</Text>
               </Text>
-
-              {isOverdue(item) ? <Text style={styles.overdue}>OVERDUE</Text> : null}
 
               <View style={styles.divider} />
 
@@ -209,6 +306,13 @@ export default function LandlordPayments() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#0F172A' },
   listContainer: { padding: 16, flexGrow: 1 },
+  topBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 12,
+  },
+  topBarTitle: { fontSize: 18, fontWeight: 'bold', color: '#F8FAFC', flex: 1, marginRight: 12 },
   totalsRow: { flexDirection: 'row', marginBottom: 16 },
   totalCard: {
     flex: 1,
@@ -241,6 +345,10 @@ const styles = StyleSheet.create({
     borderColor: '#334155',
     borderWidth: 1,
   },
+  highlightedCard: {
+    borderColor: '#38BDF8',
+    borderWidth: 2,
+  },
   cardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
   propTitle: { fontSize: 15, fontWeight: 'bold', color: '#94A3B8', flex: 1, marginRight: 8 },
   badge: { paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6, borderWidth: 1 },
@@ -248,7 +356,6 @@ const styles = StyleSheet.create({
   amount: { fontSize: 24, fontWeight: 'bold', color: '#F8FAFC', marginVertical: 6 },
   refCode: { color: '#38BDF8', fontSize: 14, fontWeight: '500' },
   boldText: { color: '#F8FAFC', fontWeight: 'bold' },
-  overdue: { color: '#EF4444', fontSize: 12, fontWeight: 'bold', marginTop: 6 },
   divider: { height: 1, backgroundColor: '#334155', marginVertical: 12 },
   infoRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 10 },
   icon: { marginRight: 10 },

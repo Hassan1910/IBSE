@@ -12,12 +12,13 @@ import {
   ScrollView,
   Image,
 } from 'react-native';
-import { useRouter } from 'expo-router';
+import { useFocusEffect, useRouter } from 'expo-router';
 import { useUser } from '@clerk/clerk-expo';
 import { supabase } from '../../lib/supabase';
 import { logAudit } from '../../lib/audit';
-import { pickImages, uploadImage } from '../../lib/storage';
+import { pickImages, uploadImage, type PickedImage } from '../../lib/storage';
 import { Plus, X, MapPin, Tag, Landmark, Edit2, Trash2, DoorOpen, Camera } from 'lucide-react-native';
+import NotificationBell from '../../components/NotificationBell';
 
 interface Property {
   id: string;
@@ -44,7 +45,7 @@ export default function LandlordProperties() {
   const [category, setCategory] = useState<'residential' | 'commercial' | 'land'>('residential');
   const [price, setPrice] = useState('');
   const [location, setLocation] = useState('');
-  const [selectedImages, setSelectedImages] = useState<string[]>([]);
+  const [selectedImages, setSelectedImages] = useState<PickedImage[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
 
@@ -67,7 +68,7 @@ export default function LandlordProperties() {
     setCategory(property.category);
     setPrice(property.price.toString());
     setLocation(property.location);
-    setSelectedImages(property.image_urls || []);
+    setSelectedImages((property.image_urls || []).map((uri) => ({ uri })));
     setModalVisible(true);
   };
 
@@ -95,9 +96,9 @@ export default function LandlordProperties() {
 
   const handlePickImages = async () => {
     try {
-      const uris = await pickImages(true);
-      if (uris.length > 0) {
-        setSelectedImages((prev) => [...prev, ...uris].slice(0, 5));
+      const picked = await pickImages(true);
+      if (picked.length > 0) {
+        setSelectedImages((prev) => [...prev, ...picked].slice(0, 5));
       }
     } catch (err: any) {
       Alert.alert('Permission Required', err.message || 'Could not access photo library.');
@@ -132,6 +133,12 @@ export default function LandlordProperties() {
     fetchProperties();
   }, [fetchProperties]);
 
+  useFocusEffect(
+    useCallback(() => {
+      fetchProperties();
+    }, [fetchProperties])
+  );
+
   const handleSubmit = async () => {
     if (!title.trim() || !description.trim() || !price || !location.trim()) {
       Alert.alert('Validation Error', 'Please fill in all required fields.');
@@ -154,13 +161,13 @@ export default function LandlordProperties() {
 
       // Upload any new local images; keep already-uploaded URLs as-is
       const uploadedUrls: string[] = [];
-      for (const uri of selectedImages) {
-        if (uri.startsWith('http://') || uri.startsWith('https://')) {
-          uploadedUrls.push(uri);
+      for (const img of selectedImages) {
+        if (img.uri.startsWith('http://') || img.uri.startsWith('https://')) {
+          uploadedUrls.push(img.uri);
         } else {
           const filename = `${Date.now()}_${Math.random().toString(36).slice(2)}.jpg`;
           const path = `${user.id}/${filename}`;
-          const publicUrl = await uploadImage('property-images', path, uri);
+          const publicUrl = await uploadImage('property-images', path, img);
           uploadedUrls.push(publicUrl);
         }
       }
@@ -222,6 +229,10 @@ export default function LandlordProperties() {
 
   return (
     <View style={styles.container}>
+      <View style={styles.topBar}>
+        <Text style={styles.topBarTitle}>My Properties</Text>
+        <NotificationBell href="/(landlord)/notifications" />
+      </View>
       {loading ? (
         <View style={styles.centered}>
           <ActivityIndicator size="large" color="#38BDF8" />
@@ -410,9 +421,9 @@ export default function LandlordProperties() {
                     showsHorizontalScrollIndicator={false}
                     style={styles.imagePreviewRow}
                   >
-                    {selectedImages.map((uri, index) => (
-                      <View key={index} style={styles.imagePreviewWrapper}>
-                        <Image source={{ uri }} style={styles.imagePreview} />
+                    {selectedImages.map((img, index) => (
+                      <View key={`${img.uri}-${index}`} style={styles.imagePreviewWrapper}>
+                        <Image source={{ uri: img.uri }} style={styles.imagePreview} />
                         <TouchableOpacity
                           style={styles.imageRemoveBtn}
                           onPress={() => handleRemoveImage(index)}
@@ -451,6 +462,15 @@ export default function LandlordProperties() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#0F172A' },
+  topBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    paddingTop: 12,
+    paddingBottom: 4,
+  },
+  topBarTitle: { fontSize: 18, fontWeight: 'bold', color: '#F8FAFC', flex: 1, marginRight: 12 },
   listContainer: { padding: 16, flexGrow: 1 },
   card: {
     backgroundColor: '#1E293B',

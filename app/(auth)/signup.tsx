@@ -15,11 +15,11 @@ import { useSignUp, useAuth } from '@clerk/clerk-expo';
 import { useRouter } from 'expo-router';
 import { supabase, setSupabaseToken } from '../../lib/supabase';
 import { logAudit } from '../../lib/audit';
-import { resolveInvite, markInviteAccepted } from '../../lib/invites';
+import { resolveInvite, markInviteAccepted, hasPendingInvite } from '../../lib/invites';
+import { isPublicSignupAllowed } from '../../lib/settings';
 
-// Staff roles (landlord, booking, finance, admin) are invite-only: the
-// administrator pre-registers those emails and the invited role overrides
-// whatever is selected here.
+// Staff roles (landlord, finance, admin) are invite-only when public
+// signup is disabled: the administrator pre-registers those emails.
 const ROLES = [
   { label: 'Client (Property Browser)', value: 'client' },
   { label: 'Tenant (Renter)', value: 'tenant' },
@@ -105,6 +105,19 @@ export default function SignUpScreen() {
 
     try {
       setLoading(true);
+
+      const allowPublic = await isPublicSignupAllowed();
+      if (!allowPublic) {
+        const invited = await hasPendingInvite(emailAddress);
+        if (!invited) {
+          Alert.alert(
+            'Invite Required',
+            'Public sign-up is disabled. Ask an administrator to invite your email before creating an account.',
+          );
+          return;
+        }
+      }
+
       await signUp.create({
         emailAddress,
         password,

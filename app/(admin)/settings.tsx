@@ -16,6 +16,7 @@ import Constants from 'expo-constants';
 import { supabase } from '../../lib/supabase';
 import { useUser } from '@clerk/clerk-expo';
 import { useAudit } from '../../hooks/useAudit';
+import { invalidateSettingsCache } from '../../lib/settings';
 import { X, Edit2, Settings as SettingsIcon, Info } from 'lucide-react-native';
 
 interface Setting {
@@ -64,6 +65,7 @@ export default function AdminSettingsScreen() {
       .eq('key', key);
     if (error) throw error;
     log({ action: 'update', entityType: 'setting', entityId: key, description: `Changed ${label}` });
+    invalidateSettingsCache();
   };
 
   const toggleBoolean = async (item: Setting) => {

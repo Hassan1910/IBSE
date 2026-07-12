@@ -14,7 +14,7 @@ import {
 } from 'react-native';
 import { useUser } from '@clerk/clerk-expo';
 import { supabase } from '../../lib/supabase';
-import { pickImages, uploadImage } from '../../lib/storage';
+import { pickImages, uploadImage, type PickedImage } from '../../lib/storage';
 import { Plus, X, MapPin, Tag, Landmark, Edit2, Trash2, Camera, User } from 'lucide-react-native';
 
 interface Property {
@@ -45,7 +45,7 @@ export default function AdminPropertiesScreen() {
   const [category, setCategory] = useState<'residential' | 'commercial' | 'land'>('residential');
   const [price, setPrice] = useState('');
   const [location, setLocation] = useState('');
-  const [selectedImages, setSelectedImages] = useState<string[]>([]);
+  const [selectedImages, setSelectedImages] = useState<PickedImage[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
 
@@ -69,7 +69,7 @@ export default function AdminPropertiesScreen() {
     setCategory(property.category);
     setPrice(property.price.toString());
     setLocation(property.location);
-    setSelectedImages(property.image_urls || []);
+    setSelectedImages((property.image_urls || []).map((uri) => ({ uri })));
     setSelectedLandlordId(property.owner_id || null);
     setModalVisible(true);
   };
@@ -97,9 +97,9 @@ export default function AdminPropertiesScreen() {
 
   const handlePickImages = async () => {
     try {
-      const uris = await pickImages(true);
-      if (uris.length > 0) {
-        setSelectedImages((prev) => [...prev, ...uris].slice(0, 5));
+      const picked = await pickImages(true);
+      if (picked.length > 0) {
+        setSelectedImages((prev) => [...prev, ...picked].slice(0, 5));
       }
     } catch (err: any) {
       Alert.alert('Permission Required', err.message || 'Could not access photo library.');
@@ -164,18 +164,23 @@ export default function AdminPropertiesScreen() {
       return;
     }
 
+    if (type === 'rental' && !selectedLandlordId) {
+      Alert.alert('Validation Error', 'Assign a landlord before saving a rental property.');
+      return;
+    }
+
     try {
       setSubmitting(true);
 
       // Upload any new local images (URIs starting with file:// or content://)
       const uploadedUrls: string[] = [];
-      for (const uri of selectedImages) {
-        if (uri.startsWith('http://') || uri.startsWith('https://')) {
-          uploadedUrls.push(uri);
+      for (const img of selectedImages) {
+        if (img.uri.startsWith('http://') || img.uri.startsWith('https://')) {
+          uploadedUrls.push(img.uri);
         } else {
           const filename = `${Date.now()}_${Math.random().toString(36).slice(2)}.jpg`;
           const path = `${user.id}/${filename}`;
-          const publicUrl = await uploadImage('property-images', path, uri);
+          const publicUrl = await uploadImage('property-images', path, img);
           uploadedUrls.push(publicUrl);
         }
       }
@@ -476,9 +481,9 @@ export default function AdminPropertiesScreen() {
                     showsHorizontalScrollIndicator={false}
                     style={styles.imagePreviewRow}
                   >
-                    {selectedImages.map((uri, index) => (
-                      <View key={index} style={styles.imagePreviewWrapper}>
-                        <Image source={{ uri }} style={styles.imagePreview} />
+                    {selectedImages.map((img, index) => (
+                      <View key={`${img.uri}-${index}`} style={styles.imagePreviewWrapper}>
+                        <Image source={{ uri: img.uri }} style={styles.imagePreview} />
                         <TouchableOpacity
                           style={styles.imageRemoveBtn}
                           onPress={() => handleRemoveImage(index)}

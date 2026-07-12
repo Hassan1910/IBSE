@@ -2,7 +2,7 @@ import { useUser, useAuth } from '@clerk/clerk-expo';
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { supabase, setSupabaseToken } from '../lib/supabase';
 
-export type UserRole = 'admin' | 'finance' | 'booking' | 'tenant' | 'client' | 'landlord';
+export type UserRole = 'admin' | 'finance' | 'tenant' | 'client' | 'landlord';
 
 export function useRole() {
   const { user, isLoaded: isUserLoaded } = useUser();
@@ -22,8 +22,8 @@ export function useRole() {
 
     if (!user) {
       // Only update state if it actually changed
-      setRole((prev) => prev === null ? prev : null);
-      setLoading((prev) => prev === false ? prev : false);
+      setRole((prev) => (prev === null ? prev : null));
+      setLoading((prev) => (prev === false ? prev : false));
       lastUserIdRef.current = null;
       return;
     }

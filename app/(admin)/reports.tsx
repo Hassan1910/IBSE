@@ -144,7 +144,7 @@ export default function AdminReportsScreen() {
         { label: 'Total Users', value: String(profiles.length), accent: true },
         { label: 'Admins', value: String(byRole('admin')) },
         { label: 'Finance Officers', value: String(byRole('finance')) },
-        { label: 'Booking Officers', value: String(byRole('booking')) },
+        { label: 'Landlords', value: String(byRole('landlord')) },
         { label: 'Tenants', value: String(byRole('tenant')) },
         { label: 'Clients', value: String(byRole('client')) },
         { label: 'New (30 days)', value: String(last30) },

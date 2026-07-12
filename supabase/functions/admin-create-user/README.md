@@ -1,8 +1,13 @@
 # admin-create-user
 
-Edge Function that lets an admin create a complete user account (Clerk identity +
-Supabase `profiles` row) with an email, username, role and password. The new user
-can log in immediately with those credentials and later change their password.
+Edge Function that lets an authorized caller create a complete user account
+(Clerk identity + Supabase `profiles` row) with an email, username, role and
+password. The new user can log in immediately with those credentials and later
+change their password.
+
+Authorization:
+- Admins may create any allowed role.
+- Landlords may create `tenant` accounts only.
 
 ## Prerequisites
 
@@ -35,8 +40,9 @@ supabase functions deploy admin-create-user
 - The gateway's `verify_jwt` check is disabled (it only accepts JWTs signed by
   Supabase itself and rejects Clerk session tokens with a 401). Instead, the
   function verifies the Clerk JWT signature against the instance's JWKS, then
-  authorizes the caller by verifying their `profiles.role = 'admin'` using the
-  service-role client.
+  authorizes the caller by verifying their `profiles.role` is `admin` or
+  `landlord` (landlords restricted to `tenant` role) using the service-role
+  client.
 - Emails created through the Clerk Backend API are marked verified, so password
   login works right away.
 - If the Supabase profile insert fails, the just-created Clerk user is rolled

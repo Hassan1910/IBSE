@@ -14,6 +14,14 @@ import {
 import { supabase } from '../../lib/supabase';
 import { useUser } from '@clerk/clerk-expo';
 import { useAudit } from '../../hooks/useAudit';
+import {
+  AssignableUnit,
+  fetchAssignableUnits,
+  hasOverlappingLease,
+  leaseAssignErrorMessage,
+  promoteClientToTenant,
+} from '../../lib/leases';
+import { createInvite, type InviteRole as InviteEmailRole } from '../../lib/invites';
 import { X, Shield, Calendar, Trash2, UserPlus, KeyRound, Mail } from 'lucide-react-native';
 import DatePickerModal from '../../components/DatePickerModal';
 
@@ -25,7 +33,8 @@ interface Profile {
   role: string;
 }
 
-type InviteRole = 'admin' | 'finance' | 'booking' | 'tenant' | 'client' | 'landlord';
+type InviteRole = 'admin' | 'finance' | 'tenant' | 'client' | 'landlord';
+type ProvisionMode = 'account' | 'invite';
 
 interface Property {
   id: string;
@@ -34,8 +43,27 @@ interface Property {
   owner_id?: string | null;
 }
 
+async function edgeFunctionErrorMessage(error: unknown, fallback: string): Promise<string> {
+  try {
+    const ctx = (error as { context?: { json?: () => Promise<{ error?: string }> } })?.context;
+    if (ctx && typeof ctx.json === 'function') {
+      const parsed = await ctx.json();
+      if (parsed?.error) return parsed.error;
+    }
+  } catch {
+    // Ignore parse errors and fall back.
+  }
+  return fallback;
+}
+
+const todayISODate = () => {
+  const d = new Date();
+  const pad = (n: number) => n.toString().padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+};
+
 export default function AdminUsersScreen() {
-  const { user: currentUser } = useUser();
+  const { user } = useUser();
   const { log } = useAudit();
   const [users, setUsers] = useState<Profile[]>([]);
   const [properties, setProperties] = useState<Property[]>([]);
@@ -43,8 +71,9 @@ export default function AdminUsersScreen() {
   const [loadingProperties, setLoadingProperties] = useState(false);
   const [loading, setLoading] = useState(true);
 
-  // Create account modal states
+  // Create account / invite modal states
   const [inviteModalVisible, setInviteModalVisible] = useState(false);
+  const [provisionMode, setProvisionMode] = useState<ProvisionMode>('account');
   const [newEmail, setNewEmail] = useState('');
   const [newUsername, setNewUsername] = useState('');
   const [newPassword, setNewPassword] = useState('');
@@ -56,6 +85,9 @@ export default function AdminUsersScreen() {
   const [leaseModalVisible, setLeaseModalVisible] = useState(false);
   const [selectedUser, setSelectedUser] = useState<Profile | null>(null);
   const [selectedPropertyId, setSelectedPropertyId] = useState('');
+  const [selectedUnitId, setSelectedUnitId] = useState('');
+  const [units, setUnits] = useState<AssignableUnit[]>([]);
+  const [loadingUnits, setLoadingUnits] = useState(false);
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
   const [rentAmount, setRentAmount] = useState('');
@@ -65,7 +97,7 @@ export default function AdminUsersScreen() {
 
   // Role Edit Modal
   const [roleModalVisible, setRoleModalVisible] = useState(false);
-  const [selectedRole, setSelectedRole] = useState<'admin' | 'finance' | 'booking' | 'tenant' | 'client' | 'landlord'>('client');
+  const [selectedRole, setSelectedRole] = useState<'admin' | 'finance' | 'tenant' | 'client' | 'landlord'>('client');
 
   const fetchAvailableProperties = async () => {
     try {
@@ -73,7 +105,6 @@ export default function AdminUsersScreen() {
 
       const [
         { data: propData, error: propError },
-        { data: activeLeases, error: leaseError },
         { count: rentalCount, error: countError },
       ] = await Promise.all([
         supabase
@@ -82,7 +113,6 @@ export default function AdminUsersScreen() {
           .eq('type', 'rental')
           .eq('status', 'available')
           .order('title', { ascending: true }),
-        supabase.from('leases').select('property_id').eq('status', 'active'),
         supabase
           .from('properties')
           .select('id', { count: 'exact', head: true })
@@ -90,13 +120,9 @@ export default function AdminUsersScreen() {
       ]);
 
       if (propError) throw propError;
-      if (leaseError) throw leaseError;
       if (countError) throw countError;
 
-      const leasedPropertyIds = new Set((activeLeases ?? []).map((lease) => lease.property_id));
-      const available = (propData ?? []).filter((property) => !leasedPropertyIds.has(property.id));
-
-      setProperties(available);
+      setProperties(propData ?? []);
       setRentalPropertyCount(rentalCount ?? 0);
     } catch (err: any) {
       console.error('Fetch available properties error:', err);
@@ -164,6 +190,45 @@ export default function AdminUsersScreen() {
       Alert.alert('Validation Error', 'Please enter a valid email address.');
       return;
     }
+
+    if (provisionMode === 'invite') {
+      if (inviteRole === 'landlord') {
+        Alert.alert(
+          'Use Create Account',
+          'Landlord accounts must be created directly (not invited). Switch to Create Account.',
+        );
+        return;
+      }
+      try {
+        setSubmittingInvite(true);
+        await createInvite({
+          email,
+          role: inviteRole as InviteEmailRole,
+          fullName: username || null,
+          invitedBy: user?.id ?? null,
+        });
+        log({
+          action: 'create',
+          entityType: 'invite',
+          description: `Invited ${email} as ${inviteRole}`,
+        });
+        Alert.alert(
+          'Invite Saved',
+          `${email} can now sign up. Their role will be set to ${inviteRole} automatically.`,
+        );
+        setInviteModalVisible(false);
+        setNewEmail('');
+        setNewUsername('');
+        setInviteRole('client');
+      } catch (err: any) {
+        console.error('Create invite error:', err);
+        Alert.alert('Error', err?.message || 'Failed to create invite.');
+      } finally {
+        setSubmittingInvite(false);
+      }
+      return;
+    }
+
     if (!username) {
       Alert.alert('Validation Error', 'Please enter a username.');
       return;
@@ -186,17 +251,7 @@ export default function AdminUsersScreen() {
 
       // Supabase surfaces non-2xx responses as an error; try to read the message.
       if (error) {
-        let message = 'Failed to create the user account.';
-        try {
-          const ctx = (error as any).context;
-          if (ctx && typeof ctx.json === 'function') {
-            const parsed = await ctx.json();
-            if (parsed?.error) message = parsed.error;
-          }
-        } catch {
-          // Ignore parse errors and fall back to the generic message.
-        }
-        Alert.alert('Error', message);
+        Alert.alert('Error', await edgeFunctionErrorMessage(error, 'Failed to create the user account.'));
         return;
       }
       if (data?.error) {
@@ -230,27 +285,43 @@ export default function AdminUsersScreen() {
   };
 
   const handleResetPassword = (user: Profile) => {
-    // Passwords are managed by Clerk (the identity provider). An admin cannot
-    // set another user's password from the client, so we trigger the secure
-    // self-service reset flow: the user receives a reset link/code by email.
     Alert.alert(
       'Reset Password',
-      `Send a password reset instruction to ${user.email}? They will use the "Forgot password" flow to set a new password securely.`,
+      `Force ${user.full_name} (${user.email}) to set a new password on their next sign-in? All of their active sessions will be signed out.`,
       [
         { text: 'Cancel', style: 'cancel' },
         {
-          text: 'Send',
+          text: 'Force Reset',
           onPress: async () => {
-            log({
-              action: 'reset_password',
-              entityType: 'user',
-              entityId: user.id,
-              description: `Requested password reset for ${user.email}`,
-            });
-            Alert.alert(
-              'Reset Requested',
-              `${user.full_name} should open the app, tap "Forgot password", and follow the emailed instructions. This request has been logged.`,
-            );
+            try {
+              const { data, error } = await supabase.functions.invoke('admin-reset-password', {
+                body: { userId: user.id },
+              });
+              if (error) {
+                Alert.alert(
+                  'Error',
+                  await edgeFunctionErrorMessage(error, 'Failed to force password reset.'),
+                );
+                return;
+              }
+              if (data?.error) {
+                Alert.alert('Error', data.error);
+                return;
+              }
+              log({
+                action: 'reset_password',
+                entityType: 'user',
+                entityId: user.id,
+                description: `Forced password reset for ${user.email}`,
+              });
+              Alert.alert(
+                'Password Reset Required',
+                `${user.full_name} must sign in again and set a new password. Their existing sessions have been revoked.`,
+              );
+            } catch (err: any) {
+              console.error('Reset password error:', err);
+              Alert.alert('Error', err?.message || 'Failed to force password reset.');
+            }
           },
         },
       ],
@@ -259,27 +330,41 @@ export default function AdminUsersScreen() {
 
   const handleDeleteUser = (id: string, fullName: string) => {
     Alert.alert(
-      'Delete User Profile',
-      `Are you sure you want to permanently delete ${fullName}? This will also delete their leases, bookings, and payments. Their authentication account may still exist.`,
+      'Delete User',
+      `Permanently delete ${fullName}? This removes their login and profile, including related leases, bookings, and payments.`,
       [
         { text: 'Cancel', style: 'cancel' },
-        { 
-          text: 'Delete', 
-          style: 'destructive', 
+        {
+          text: 'Delete',
+          style: 'destructive',
           onPress: async () => {
             try {
-              const { error } = await supabase.from('profiles').delete().eq('id', id);
-              if (error) throw error;
-              log({ action: 'delete', entityType: 'user', entityId: id, description: `Deleted ${fullName}` });
-              Alert.alert('Success', 'User profile deleted.');
-              setUsers(prev => prev.filter(u => u.id !== id));
+              const { data, error } = await supabase.functions.invoke('admin-delete-user', {
+                body: { userId: id },
+              });
+              if (error) {
+                Alert.alert('Error', await edgeFunctionErrorMessage(error, 'Failed to delete user.'));
+                return;
+              }
+              if (data?.error) {
+                Alert.alert('Error', data.error);
+                return;
+              }
+              log({
+                action: 'delete',
+                entityType: 'user',
+                entityId: id,
+                description: `Deleted ${fullName}`,
+              });
+              Alert.alert('Success', 'User account deleted.');
+              setUsers((prev) => prev.filter((u) => u.id !== id));
             } catch (err) {
               console.error('Delete user error:', err);
               Alert.alert('Error', 'Failed to delete user.');
             }
-          }
-        }
-      ]
+          },
+        },
+      ],
     );
   };
 
@@ -294,60 +379,82 @@ export default function AdminUsersScreen() {
       Alert.alert('Validation Error', 'Please enter a valid monthly rent amount.');
       return;
     }
+    if (endDate < startDate) {
+      Alert.alert('Validation Error', 'End date must be on or after the start date.');
+      return;
+    }
+    if (units.length > 0 && !selectedUnitId) {
+      Alert.alert('Validation Error', 'Please select a unit for this property.');
+      return;
+    }
 
     try {
       setSubmittingLease(true);
 
-      // Find property owner_id
+      // Find property owner — do not fall back to the admin's id, or the
+      // landlord dashboard will never see this lease under RLS.
       const selectedProp = properties.find((p) => p.id === selectedPropertyId);
-      const ownerId = selectedProp?.owner_id || currentUser?.id || null;
+      const ownerId = selectedProp?.owner_id || null;
+      if (!ownerId) {
+        Alert.alert(
+          'Missing Landlord',
+          'Assign a landlord to this property before creating a lease.',
+        );
+        return;
+      }
 
-      // 1. Insert lease record
+      const unitId = selectedUnitId || null;
+      const overlaps = await hasOverlappingLease({
+        propertyId: selectedPropertyId,
+        unitId,
+        startDate,
+        endDate,
+      });
+      if (overlaps) {
+        Alert.alert(
+          'Space Unavailable',
+          'This space already has a pending or active lease for overlapping dates. Terminate or renew the existing agreement instead.',
+        );
+        return;
+      }
+
+      // Insert pending lease — becomes active when rent payment is verified.
       const { error: leaseError } = await supabase.from('leases').insert({
         property_id: selectedPropertyId,
+        unit_id: unitId,
         tenant_id: selectedUser.id,
         owner_id: ownerId,
         start_date: startDate,
         end_date: endDate,
         rent_amount: rentNum,
-        status: 'active',
+        status: 'pending',
       });
 
       if (leaseError) throw leaseError;
 
-      // 2. Mark property as rented
-      const { error: propError } = await supabase
-        .from('properties')
-        .update({ status: 'rented' })
-        .eq('id', selectedPropertyId);
-
-      if (propError) throw propError;
-
-      // 3. Auto-update user's role to 'tenant' if they are listed as 'client'
-      if (selectedUser.role === 'client') {
-        await supabase
-          .from('profiles')
-          .update({ role: 'tenant' })
-          .eq('id', selectedUser.id);
-      }
+      await promoteClientToTenant(selectedUser.id, selectedUser.role);
 
       log({
         action: 'create',
         entityType: 'lease',
         entityId: selectedUser.id,
-        description: `Allocated lease to ${selectedUser.full_name}`,
+        description: `Allocated pending lease to ${selectedUser.full_name}`,
       });
-      Alert.alert('Lease Assigned 🎉', `Active lease created successfully for ${selectedUser.full_name}.`);
+      Alert.alert(
+        'Lease Assigned',
+        `Pending lease created for ${selectedUser.full_name}. It becomes active after rent is paid and verified.`,
+      );
       setLeaseModalVisible(false);
-      // Reset form fields
       setSelectedPropertyId('');
-      setStartDate('');
+      setSelectedUnitId('');
+      setUnits([]);
+      setStartDate(todayISODate());
       setEndDate('');
       setRentAmount('');
       fetchData();
     } catch (err: any) {
       console.error('Create lease error:', err);
-      Alert.alert('Error', 'Failed to create active lease.');
+      Alert.alert('Error', leaseAssignErrorMessage(err));
     } finally {
       setSubmittingLease(false);
     }
@@ -356,11 +463,29 @@ export default function AdminUsersScreen() {
   const openLeaseModal = async (user: Profile) => {
     setSelectedUser(user);
     setSelectedPropertyId('');
-    setStartDate('');
+    setSelectedUnitId('');
+    setUnits([]);
+    setStartDate(todayISODate());
     setEndDate('');
     setRentAmount('');
     setLeaseModalVisible(true);
     await fetchAvailableProperties();
+  };
+
+  const selectProperty = async (property: Property) => {
+    setSelectedPropertyId(property.id);
+    setSelectedUnitId('');
+    setRentAmount(property.price.toString());
+    try {
+      setLoadingUnits(true);
+      const assignable = await fetchAssignableUnits(property.id);
+      setUnits(assignable);
+    } catch (err) {
+      console.error('Fetch assignable units error:', err);
+      setUnits([]);
+    } finally {
+      setLoadingUnits(false);
+    }
   };
 
   const openRoleModal = (user: Profile) => {
@@ -400,7 +525,7 @@ export default function AdminUsersScreen() {
                   <Text style={styles.roleBtnText}>Change Role</Text>
                 </TouchableOpacity>
 
-                {item.role !== 'admin' && (
+                {(item.role === 'client' || item.role === 'tenant') && (
                   <TouchableOpacity
                     style={[styles.btn, styles.leaseBtn]}
                     onPress={() => openLeaseModal(item)}
@@ -434,7 +559,13 @@ export default function AdminUsersScreen() {
           onRefresh={fetchData}
           refreshing={loading}
         />
-        <TouchableOpacity style={styles.fab} onPress={() => setInviteModalVisible(true)}>
+        <TouchableOpacity
+          style={styles.fab}
+          onPress={() => {
+            setProvisionMode('account');
+            setInviteModalVisible(true);
+          }}
+        >
           <UserPlus size={24} color="#0F172A" />
         </TouchableOpacity>
         </>
@@ -450,18 +581,40 @@ export default function AdminUsersScreen() {
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
             <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>Create User Account</Text>
+              <Text style={styles.modalTitle}>
+                {provisionMode === 'invite' ? 'Invite User' : 'Create User Account'}
+              </Text>
               <TouchableOpacity onPress={() => setInviteModalVisible(false)}>
                 <X size={24} color="#94A3B8" />
               </TouchableOpacity>
             </View>
 
             <ScrollView contentContainerStyle={styles.modalBody} showsVerticalScrollIndicator={false}>
+              <View style={styles.modeRow}>
+                <TouchableOpacity
+                  style={[styles.modeBtn, provisionMode === 'account' && styles.modeBtnActive]}
+                  onPress={() => setProvisionMode('account')}
+                >
+                  <Text style={[styles.modeBtnText, provisionMode === 'account' && styles.modeBtnTextActive]}>
+                    Create Account
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.modeBtn, provisionMode === 'invite' && styles.modeBtnActive]}
+                  onPress={() => setProvisionMode('invite')}
+                >
+                  <Text style={[styles.modeBtnText, provisionMode === 'invite' && styles.modeBtnTextActive]}>
+                    Invite Email
+                  </Text>
+                </TouchableOpacity>
+              </View>
+
               <View style={styles.inviteNote}>
                 <Mail size={16} color="#38BDF8" style={{ marginRight: 8 }} />
                 <Text style={styles.inviteNoteText}>
-                  Create a complete login account. The user signs in with the email and password you set
-                  here, and can change their password later from their profile.
+                  {provisionMode === 'invite'
+                    ? 'Save an invite so this email can self-register. Required when public sign-up is disabled. Their role is applied on sign-up.'
+                    : 'Create a complete login account. The user signs in with the email and password you set here, and can change their password later from their profile.'}
                 </Text>
               </View>
 
@@ -479,7 +632,7 @@ export default function AdminUsersScreen() {
               </View>
 
               <View style={styles.inputGroup}>
-                <Text style={styles.label}>Username</Text>
+                <Text style={styles.label}>{provisionMode === 'invite' ? 'Full Name (optional)' : 'Username'}</Text>
                 <TextInput
                   style={styles.modalInput}
                   placeholder="e.g. Jane Doe"
@@ -490,36 +643,44 @@ export default function AdminUsersScreen() {
                 />
               </View>
 
-              <View style={styles.inputGroup}>
-                <Text style={styles.label}>Password</Text>
-                <TextInput
-                  style={styles.modalInput}
-                  placeholder="At least 8 characters"
-                  placeholderTextColor="#999"
-                  value={newPassword}
-                  onChangeText={setNewPassword}
-                  secureTextEntry
-                  autoCapitalize="none"
-                />
-              </View>
+              {provisionMode === 'account' ? (
+                <>
+                  <View style={styles.inputGroup}>
+                    <Text style={styles.label}>Password</Text>
+                    <TextInput
+                      style={styles.modalInput}
+                      placeholder="At least 8 characters"
+                      placeholderTextColor="#999"
+                      value={newPassword}
+                      onChangeText={setNewPassword}
+                      secureTextEntry
+                      autoCapitalize="none"
+                    />
+                  </View>
 
-              <View style={styles.inputGroup}>
-                <Text style={styles.label}>Confirm Password</Text>
-                <TextInput
-                  style={styles.modalInput}
-                  placeholder="Re-enter the password"
-                  placeholderTextColor="#999"
-                  value={confirmPassword}
-                  onChangeText={setConfirmPassword}
-                  secureTextEntry
-                  autoCapitalize="none"
-                />
-              </View>
+                  <View style={styles.inputGroup}>
+                    <Text style={styles.label}>Confirm Password</Text>
+                    <TextInput
+                      style={styles.modalInput}
+                      placeholder="Re-enter the password"
+                      placeholderTextColor="#999"
+                      value={confirmPassword}
+                      onChangeText={setConfirmPassword}
+                      secureTextEntry
+                      autoCapitalize="none"
+                    />
+                  </View>
+                </>
+              ) : null}
 
               <View style={styles.inputGroup}>
                 <Text style={styles.label}>Assign Role</Text>
                 <View style={styles.roleSelectionRow}>
-                  {(['client', 'tenant', 'landlord', 'booking', 'finance', 'admin'] as InviteRole[]).map((r) => (
+                  {(
+                    provisionMode === 'invite'
+                      ? (['client', 'tenant', 'finance', 'admin'] as InviteRole[])
+                      : (['client', 'tenant', 'landlord', 'finance', 'admin'] as InviteRole[])
+                  ).map((r) => (
                     <TouchableOpacity
                       key={r}
                       style={[styles.roleSelectBtn, inviteRole === r && styles.roleSelectBtnActive]}
@@ -537,7 +698,9 @@ export default function AdminUsersScreen() {
                 {submittingInvite ? (
                   <ActivityIndicator color="#0F172A" />
                 ) : (
-                  <Text style={styles.submitBtnText}>Create Account</Text>
+                  <Text style={styles.submitBtnText}>
+                    {provisionMode === 'invite' ? 'Save Invite' : 'Create Account'}
+                  </Text>
                 )}
               </TouchableOpacity>
             </ScrollView>
@@ -566,7 +729,7 @@ export default function AdminUsersScreen() {
                 <Text style={styles.modalSubText}>User: {selectedUser.full_name}</Text>
                 
                 <View style={styles.roleSelectionRow}>
-                  {['client', 'tenant', 'landlord', 'booking', 'finance', 'admin'].map((r) => (
+                  {['client', 'tenant', 'landlord', 'finance', 'admin'].map((r) => (
                     <TouchableOpacity
                       key={r}
                       style={[
@@ -624,8 +787,8 @@ export default function AdminUsersScreen() {
                   ) : properties.length === 0 ? (
                     <Text style={styles.errorText}>
                       {rentalPropertyCount === 0
-                        ? 'No rental listings found. Go to Manage Properties and add a rental listing first.'
-                        : 'All rental properties are currently leased. Mark a property as Available in Manage Properties, or terminate an existing lease to free one up.'}
+                        ? 'No rental listings found. Go to Manage Properties and add a rental listing with a landlord assigned.'
+                        : 'No available rental properties. Assign a landlord, free a vacant unit, or terminate an existing lease.'}
                     </Text>
                   ) : (
                     <View style={styles.propertyGrid}>
@@ -636,10 +799,7 @@ export default function AdminUsersScreen() {
                             styles.propertyBtn,
                             selectedPropertyId === p.id && styles.propertyBtnActive,
                           ]}
-                          onPress={() => {
-                            setSelectedPropertyId(p.id);
-                            setRentAmount(p.price.toString());
-                          }}
+                          onPress={() => selectProperty(p)}
                         >
                           <Text
                             style={[
@@ -654,6 +814,46 @@ export default function AdminUsersScreen() {
                     </View>
                   )}
                 </View>
+
+                {selectedPropertyId ? (
+                  <View style={styles.inputGroup}>
+                    <Text style={styles.label}>
+                      {units.length > 0 || loadingUnits ? 'Select Unit' : 'Unit'}
+                    </Text>
+                    {loadingUnits ? (
+                      <ActivityIndicator color="#38BDF8" style={styles.propertyLoader} />
+                    ) : units.length === 0 ? (
+                      <Text style={styles.modalSubText}>
+                        Whole-property lease (no vacant units listed for this property).
+                      </Text>
+                    ) : (
+                      <View style={styles.propertyGrid}>
+                        {units.map((u) => (
+                          <TouchableOpacity
+                            key={u.id}
+                            style={[
+                              styles.propertyBtn,
+                              selectedUnitId === u.id && styles.propertyBtnActive,
+                            ]}
+                            onPress={() => {
+                              setSelectedUnitId(u.id);
+                              setRentAmount(u.rent_amount.toString());
+                            }}
+                          >
+                            <Text
+                              style={[
+                                styles.propertyText,
+                                selectedUnitId === u.id && styles.propertyTextActive,
+                              ]}
+                            >
+                              Unit {u.unit_number} (KES {u.rent_amount})
+                            </Text>
+                          </TouchableOpacity>
+                        ))}
+                      </View>
+                    )}
+                  </View>
+                ) : null}
 
                 {/* Dates */}
                 <View style={styles.inputGroup}>
@@ -715,7 +915,7 @@ export default function AdminUsersScreen() {
                   {submittingLease ? (
                     <ActivityIndicator color="#0F172A" />
                   ) : (
-                    <Text style={styles.submitBtnText}>Activate Lease</Text>
+                    <Text style={styles.submitBtnText}>Assign Pending Lease</Text>
                   )}
                 </TouchableOpacity>
               </ScrollView>
@@ -880,6 +1080,31 @@ const styles = StyleSheet.create({
     fontSize: 12,
     lineHeight: 18,
     flex: 1,
+  },
+  modeRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginBottom: 16,
+  },
+  modeBtn: {
+    flex: 1,
+    paddingVertical: 10,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#334155',
+    alignItems: 'center',
+  },
+  modeBtnActive: {
+    backgroundColor: '#38BDF8',
+    borderColor: '#38BDF8',
+  },
+  modeBtnText: {
+    color: '#94A3B8',
+    fontWeight: '600',
+    fontSize: 13,
+  },
+  modeBtnTextActive: {
+    color: '#0F172A',
   },
   centered: {
     flex: 1,

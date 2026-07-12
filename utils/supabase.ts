@@ -30,9 +30,6 @@ export const setSupabaseTokenGetter = (getter: TokenGetter | null) => {
 };
 
 // Supabase client configured with AsyncStorage and dynamic Clerk JWT headers
-// #region agent log
-console.log('[DEBUG d1d833] supabase module init', { hasUrl: !!supabaseUrl, hasKey: !!supabaseAnonKey });
-// #endregion
 export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
   auth: {
     storage: AsyncStorage,
@@ -49,20 +46,15 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
       if (tokenGetter) {
         try {
           const fresh = await tokenGetter();
-          console.log('[DEBUG FETCH] tokenGetter returned:', fresh ? `${fresh.substring(0, 15)}...` : 'null/undefined');
           if (fresh) {
             token = fresh;
             currentClerkToken = fresh;
           }
-        } catch (err: any) {
-          console.error('[DEBUG FETCH] tokenGetter threw error:', err.message || err);
+        } catch {
           // Fall back to the last known token if refresh fails.
         }
-      } else {
-        console.log('[DEBUG FETCH] tokenGetter is not set');
       }
 
-      console.log('[DEBUG FETCH] sending token:', token ? `${token.substring(0, 15)}...` : 'null/undefined');
       if (token) {
         headers.set('Authorization', `Bearer ${token}`);
       }

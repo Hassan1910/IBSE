@@ -7,6 +7,7 @@ import {
   ActivityIndicator,
   Alert,
 } from 'react-native';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 import { supabase } from '../../lib/supabase';
 import { useUser } from '@clerk/clerk-expo';
 import { Calendar, Clock, HelpCircle, CheckCircle, XCircle, CheckCheck } from 'lucide-react-native';
@@ -25,8 +26,11 @@ interface Booking {
 
 export default function MyBookingsScreen() {
   const { user } = useUser();
+  const router = useRouter();
+  const { id: focusId } = useLocalSearchParams<{ id?: string }>();
   const [bookings, setBookings] = useState<Booking[]>([]);
   const [loading, setLoading] = useState(true);
+  const [highlightedId, setHighlightedId] = useState<string | null>(null);
 
   const fetchMyBookings = async () => {
     if (!user) return;
@@ -59,6 +63,14 @@ export default function MyBookingsScreen() {
   useEffect(() => {
     fetchMyBookings();
   }, [user]);
+
+  useEffect(() => {
+    if (!focusId || loading) return;
+    if (bookings.some((b) => b.id === focusId)) {
+      setHighlightedId(focusId);
+      router.setParams({ id: undefined });
+    }
+  }, [focusId, loading, bookings, router]);
 
   const formatDate = (dateStr: string) => {
     const d = new Date(dateStr);
@@ -133,7 +145,7 @@ export default function MyBookingsScreen() {
           data={bookings}
           keyExtractor={(item) => item.id}
           renderItem={({ item }) => (
-            <View style={styles.card}>
+            <View style={[styles.card, highlightedId === item.id && styles.highlightedCard]}>
               <View style={styles.cardHeader}>
                 <Text style={styles.propTitle}>{item.properties?.title}</Text>
                 {renderStatus(item.status)}
@@ -189,6 +201,10 @@ const styles = StyleSheet.create({
     marginBottom: 16,
     borderColor: '#334155',
     borderWidth: 1,
+  },
+  highlightedCard: {
+    borderColor: '#38BDF8',
+    borderWidth: 2,
   },
   cardHeader: {
     flexDirection: 'row',

@@ -12,3 +12,9 @@ project_id = "bqkehphkfkvijxfvgyuh"
 # checks the caller's profile role is 'admin'.
 [functions.admin-create-user]
 verify_jwt = false
+
+[functions.admin-reset-password]
+verify_jwt = false
+
+[functions.admin-delete-user]
+verify_jwt = false

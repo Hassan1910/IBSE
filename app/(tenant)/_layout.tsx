@@ -1,6 +1,11 @@
 import { Tabs } from 'expo-router';
 import { Home, CreditCard, Wrench, User } from 'lucide-react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import NotificationBell from '../../components/NotificationBell';
+
+function TenantHeaderBell() {
+  return <NotificationBell href="/(tenant)/notifications" />;
+}
 
 export default function TenantLayout() {
   const insets = useSafeAreaInsets();
@@ -27,6 +32,8 @@ export default function TenantLayout() {
           fontWeight: 'bold',
           fontSize: 18,
         },
+        headerRight: () => <TenantHeaderBell />,
+        headerRightContainerStyle: { paddingRight: 16 },
       }}
     >
       <Tabs.Screen
@@ -64,7 +71,10 @@ export default function TenantLayout() {
       <Tabs.Screen name="agreements" options={{ href: null, title: 'My Agreement' }} />
       <Tabs.Screen name="documents" options={{ href: null, title: 'My Documents' }} />
       <Tabs.Screen name="feedback" options={{ href: null, title: 'Feedback & Complaints' }} />
-      <Tabs.Screen name="notifications" options={{ href: null, title: 'Notifications' }} />
+      <Tabs.Screen
+        name="notifications"
+        options={{ href: null, title: 'Notifications', headerRight: () => null }}
+      />
       <Tabs.Screen name="help" options={{ href: null, title: 'Help & Guides' }} />
     </Tabs>
   );

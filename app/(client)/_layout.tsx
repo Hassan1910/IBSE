@@ -61,6 +61,7 @@ export default function ClientLayout() {
           tabBarIcon: ({ color, size }) => <User color={color} size={size} />,
         }}
       />
+      <Tabs.Screen name="notifications" options={{ href: null, title: 'Notifications' }} />
     </Tabs>
   );
 }

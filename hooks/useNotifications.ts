@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import { useFocusEffect } from 'expo-router';
 import { useUser } from '@clerk/clerk-expo';
 import { getUnreadCount } from '../lib/notifications';
 
@@ -30,6 +31,12 @@ export function useNotifications() {
   useEffect(() => {
     refreshUnreadCount();
   }, [refreshUnreadCount]);
+
+  useFocusEffect(
+    useCallback(() => {
+      refreshUnreadCount();
+    }, [refreshUnreadCount]),
+  );
 
   return { unreadCount, loading, refreshUnreadCount };
 }

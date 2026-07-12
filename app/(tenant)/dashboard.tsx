@@ -1,9 +1,10 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useMemo, useRef, useState } from 'react';
 import { View, Text, StyleSheet, ActivityIndicator, Alert, ScrollView, RefreshControl, TouchableOpacity } from 'react-native';
-import { useRouter } from 'expo-router';
+import { useFocusEffect, useRouter } from 'expo-router';
 import { supabase } from '../../lib/supabase';
+import { leaseTotalRent } from '../../lib/leases';
 import { useUser } from '@clerk/clerk-expo';
-import { Bell, Calendar, CreditCard, DollarSign, FileText, HelpCircle, Home, Wrench } from 'lucide-react-native';
+import { Calendar, CreditCard, DollarSign, FileText, HelpCircle, Home, MessageSquare, Wrench } from 'lucide-react-native';
 import { useNotifications } from '../../hooks/useNotifications';
 
 interface Lease {
@@ -29,23 +30,30 @@ interface Payment {
   payment_method: string;
   reference_code: string;
   status: 'pending' | 'verified' | 'failed';
+  lease_id: string | null;
 }
 
 export default function TenantDashboard() {
   const router = useRouter();
   const { user } = useUser();
-  const { unreadCount, refreshUnreadCount } = useNotifications();
+  const { refreshUnreadCount } = useNotifications();
   const [activeLease, setActiveLease] = useState<Lease | null>(null);
+  const [pendingLease, setPendingLease] = useState<Lease | null>(null);
   const [payments, setPayments] = useState<Payment[]>([]);
   const [openMaintenance, setOpenMaintenance] = useState(0);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const hasLoadedRef = useRef(false);
 
-  const fetchData = useCallback(async () => {
+  const fetchData = useCallback(async (opts?: { silent?: boolean }) => {
     if (!user) return;
 
     try {
-      setLoading(true);
+      if (opts?.silent) {
+        setRefreshing(true);
+      } else {
+        setLoading(true);
+      }
       const [leaseRes, payRes, maintRes] = await Promise.all([
         supabase
           .from('leases')
@@ -62,11 +70,11 @@ export default function TenantDashboard() {
             units ( unit_number )
           `)
           .eq('tenant_id', user.id)
-          .eq('status', 'active')
-          .maybeSingle(),
+          .in('status', ['pending', 'active'])
+          .order('start_date', { ascending: false }),
         supabase
           .from('payments')
-          .select('id, amount, payment_date, payment_method, reference_code, status')
+          .select('id, amount, payment_date, payment_method, reference_code, status, lease_id')
           .eq('payer_id', user.id)
           .order('payment_date', { ascending: false }),
         supabase
@@ -76,37 +84,36 @@ export default function TenantDashboard() {
           .neq('status', 'resolved'),
       ]);
 
-      console.log('[DEBUG DASHBOARD] user.id:', user.id);
-      console.log('[DEBUG DASHBOARD] leaseRes:', { data: leaseRes.data, error: leaseRes.error });
-      console.log('[DEBUG DASHBOARD] payRes:', { data: payRes.data, error: payRes.error });
-      console.log('[DEBUG DASHBOARD] maintRes:', { data: maintRes.data, count: maintRes.count, error: maintRes.error });
-
       if (leaseRes.error) throw leaseRes.error;
       if (payRes.error) throw payRes.error;
       if (maintRes.error) throw maintRes.error;
 
-      setActiveLease((leaseRes.data as any) || null);
+      const leases = (leaseRes.data as any as Lease[]) || [];
+      setActiveLease(leases.find((l) => l.status === 'active') || null);
+      setPendingLease(leases.find((l) => l.status === 'pending') || null);
       setPayments((payRes.data as any) || []);
       setOpenMaintenance(maintRes.count || 0);
     } catch (err: any) {
       console.error('Fetch tenant data error:', err);
       Alert.alert('Error', 'Failed to load lease and payment details.');
     } finally {
+      hasLoadedRef.current = true;
       setLoading(false);
+      setRefreshing(false);
     }
   }, [user]);
 
-  useEffect(() => {
-    fetchData();
-  }, [fetchData]);
+  // Tab screens stay mounted, so refetch whenever this screen is focused
+  // (e.g. after submitting a payment or maintenance request on another tab).
+  useFocusEffect(
+    useCallback(() => {
+      fetchData({ silent: hasLoadedRef.current });
+      refreshUnreadCount();
+    }, [fetchData, refreshUnreadCount])
+  );
 
   const onRefresh = useCallback(async () => {
-    setRefreshing(true);
-    try {
-      await Promise.all([fetchData(), refreshUnreadCount()]);
-    } finally {
-      setRefreshing(false);
-    }
+    await Promise.all([fetchData({ silent: true }), refreshUnreadCount()]);
   }, [fetchData, refreshUnreadCount]);
 
   const formatPrice = (price: number) =>
@@ -126,18 +133,24 @@ export default function TenantDashboard() {
     }
   };
 
-  const currentMonthVerifiedPayments = useMemo(() => {
-    const now = new Date();
-    return payments
-      .filter((p) => p.status === 'verified')
-      .filter((p) => {
-        const d = new Date(p.payment_date);
-        return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear();
-      })
-      .reduce((sum, p) => sum + Number(p.amount), 0);
-  }, [payments]);
+  const leaseTotal = useMemo(() => {
+    if (!activeLease) return 0;
+    return leaseTotalRent(activeLease.rent_amount, activeLease.start_date, activeLease.end_date);
+  }, [activeLease]);
 
-  const outstandingBalance = Math.max((activeLease?.rent_amount || 0) - currentMonthVerifiedPayments, 0);
+  const verifiedPaymentsTotal = useMemo(() => {
+    if (!activeLease) return 0;
+    return payments
+      .filter((p) => p.status === 'verified' && p.lease_id === activeLease.id)
+      .reduce((sum, p) => sum + Number(p.amount), 0);
+  }, [payments, activeLease]);
+
+  const outstandingBalance = Math.max(leaseTotal - verifiedPaymentsTotal, 0);
+  const currentLeaseId = activeLease?.id || pendingLease?.id || null;
+  const leaseScopedPayments = useMemo(() => {
+    if (!currentLeaseId) return payments;
+    return payments.filter((p) => p.lease_id === currentLeaseId);
+  }, [payments, currentLeaseId]);
   const leaseDaysLeft = useMemo(() => {
     if (!activeLease?.end_date) return null;
     const diff = new Date(activeLease.end_date).getTime() - Date.now();
@@ -160,21 +173,13 @@ export default function TenantDashboard() {
     >
       <View style={styles.headerRow}>
         <Text style={styles.headerTitle}>Tenant Dashboard</Text>
-        <TouchableOpacity style={styles.bellBtn} onPress={() => router.push('/(tenant)/notifications')}>
-          <Bell size={18} color="#38BDF8" />
-          {unreadCount > 0 ? (
-            <View style={styles.badgeDot}>
-              <Text style={styles.badgeDotText}>{unreadCount > 9 ? '9+' : unreadCount}</Text>
-            </View>
-          ) : null}
-        </TouchableOpacity>
       </View>
 
       <View style={styles.statsGrid}>
         <View style={styles.statCard}>
           <DollarSign size={16} color="#38BDF8" />
-          <Text style={styles.statLabel}>Monthly Rent</Text>
-          <Text style={styles.statValue}>{activeLease ? formatPrice(activeLease.rent_amount) : 'N/A'}</Text>
+          <Text style={styles.statLabel}>Lease Total</Text>
+          <Text style={styles.statValue}>{activeLease ? formatPrice(leaseTotal) : 'N/A'}</Text>
         </View>
         <View style={styles.statCard}>
           <CreditCard size={16} color="#EAB308" />
@@ -206,7 +211,7 @@ export default function TenantDashboard() {
           <Text style={styles.quickText}>Documents</Text>
         </TouchableOpacity>
         <TouchableOpacity style={styles.quickCard} onPress={() => router.push('/(tenant)/feedback')}>
-          <CreditCard size={16} color="#EAB308" />
+          <MessageSquare size={16} color="#EAB308" />
           <Text style={styles.quickText}>Feedback</Text>
         </TouchableOpacity>
         <TouchableOpacity style={styles.quickCard} onPress={() => router.push('/(tenant)/help')}>
@@ -232,8 +237,11 @@ export default function TenantDashboard() {
           <View style={styles.infoRow}>
             <DollarSign size={18} color="#38BDF8" style={styles.infoIcon} />
             <View>
-              <Text style={styles.infoLabel}>Monthly Rent</Text>
-              <Text style={styles.infoVal}>{formatPrice(activeLease.rent_amount)}</Text>
+              <Text style={styles.infoLabel}>Lease Total</Text>
+              <Text style={styles.infoVal}>{formatPrice(leaseTotal)}</Text>
+              <Text style={styles.infoHint}>
+                {formatPrice(activeLease.rent_amount)}/month · {formatPrice(verifiedPaymentsTotal)} verified paid
+              </Text>
             </View>
           </View>
 
@@ -248,6 +256,28 @@ export default function TenantDashboard() {
           </View>
           {activeLease.contract_url ? <Text style={styles.infoHint}>Agreement document available in Documents.</Text> : null}
         </View>
+      ) : pendingLease ? (
+        <View style={styles.leaseCard}>
+          <View style={styles.leaseHeader}>
+            <Home size={24} color="#EAB308" />
+            <View style={styles.leaseTitleContainer}>
+              <Text style={styles.leaseTitle}>{pendingLease.properties?.title}</Text>
+              <Text style={styles.leaseLoc}>{pendingLease.properties?.location}</Text>
+              {pendingLease.units?.unit_number ? (
+                <Text style={styles.leaseLoc}>Unit: {pendingLease.units.unit_number}</Text>
+              ) : null}
+              <Text style={styles.pendingBadge}>PENDING PAYMENT</Text>
+            </View>
+          </View>
+          <View style={styles.divider} />
+          <Text style={styles.pendingCopy}>
+            Your lease is assigned but not active yet. Submit rent payment, then wait for your landlord to verify it.
+          </Text>
+          <TouchableOpacity style={styles.payCta} onPress={() => router.push('/(tenant)/rent')}>
+            <CreditCard size={16} color="#0F172A" style={{ marginRight: 8 }} />
+            <Text style={styles.payCtaText}>Submit Rent Payment</Text>
+          </TouchableOpacity>
+        </View>
       ) : (
         <View style={styles.emptyCard}>
           <Text style={styles.emptyCardText}>No active lease registered under your profile.</Text>
@@ -255,12 +285,12 @@ export default function TenantDashboard() {
       )}
 
       <Text style={styles.sectionTitle}>Payment History</Text>
-      {payments.length === 0 ? (
+      {leaseScopedPayments.length === 0 ? (
         <View style={styles.emptyCard}>
-          <Text style={styles.emptyCardText}>No payments recorded.</Text>
+          <Text style={styles.emptyCardText}>No payments recorded for your current lease.</Text>
         </View>
       ) : (
-        payments.map((item) => (
+        leaseScopedPayments.map((item) => (
           <View key={item.id} style={styles.payCard}>
             <View style={styles.payHeader}>
               <View style={styles.payMethodRow}>
@@ -301,33 +331,6 @@ const styles = StyleSheet.create({
     fontSize: 20,
     fontWeight: 'bold',
     color: '#F8FAFC',
-  },
-  bellBtn: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    borderWidth: 1,
-    borderColor: '#334155',
-    backgroundColor: '#1E293B',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  badgeDot: {
-    position: 'absolute',
-    top: -4,
-    right: -4,
-    minWidth: 16,
-    height: 16,
-    borderRadius: 8,
-    backgroundColor: '#EF4444',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: 3,
-  },
-  badgeDotText: {
-    color: '#F8FAFC',
-    fontSize: 9,
-    fontWeight: 'bold',
   },
   statsGrid: {
     flexDirection: 'row',
@@ -417,6 +420,33 @@ const styles = StyleSheet.create({
     fontSize: 13,
     color: '#94A3B8',
     marginTop: 2,
+  },
+  pendingBadge: {
+    marginTop: 6,
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#EAB308',
+    letterSpacing: 0.4,
+  },
+  pendingCopy: {
+    fontSize: 13,
+    color: '#94A3B8',
+    lineHeight: 19,
+    marginBottom: 14,
+  },
+  payCta: {
+    backgroundColor: '#38BDF8',
+    borderRadius: 10,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  payCtaText: {
+    color: '#0F172A',
+    fontWeight: '700',
+    fontSize: 14,
   },
   divider: {
     height: 1,

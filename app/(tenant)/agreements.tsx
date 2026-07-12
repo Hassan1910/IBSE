@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { ActivityIndicator, Alert, Linking, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { useUser } from '@clerk/clerk-expo';
 import { supabase } from '../../lib/supabase';
+import { leaseTotalRent } from '../../lib/leases';
 import { Calendar, FileText, Home, Link as LinkIcon } from 'lucide-react-native';
 
 interface LeaseAgreement {
@@ -9,6 +10,7 @@ interface LeaseAgreement {
   start_date: string;
   end_date: string;
   rent_amount: number;
+  status: string;
   terms: string | null;
   contract_url: string | null;
   properties: {
@@ -37,20 +39,24 @@ export default function TenantAgreementsScreen() {
             start_date,
             end_date,
             rent_amount,
+            status,
             terms,
             contract_url,
             properties ( title, location ),
             units ( unit_number )
           `)
           .eq('tenant_id', user.id)
-          .eq('status', 'active')
+          .in('status', ['pending', 'active'])
+          .order('status', { ascending: true })
+          .order('start_date', { ascending: false })
+          .limit(1)
           .maybeSingle();
 
         if (error) throw error;
         setLease((data as any) || null);
       } catch (err) {
         console.error('Fetch agreement error:', err);
-        Alert.alert('Error', 'Failed to load your active agreement.');
+        Alert.alert('Error', 'Failed to load your lease agreement.');
       } finally {
         setLoading(false);
       }
@@ -61,12 +67,11 @@ export default function TenantAgreementsScreen() {
 
   const openContract = async () => {
     if (!lease?.contract_url) return;
-    const canOpen = await Linking.canOpenURL(lease.contract_url);
-    if (!canOpen) {
+    try {
+      await Linking.openURL(lease.contract_url);
+    } catch {
       Alert.alert('Invalid URL', 'Could not open this contract link.');
-      return;
     }
-    Linking.openURL(lease.contract_url);
   };
 
   const formatPrice = (price: number) =>
@@ -87,7 +92,7 @@ export default function TenantAgreementsScreen() {
   if (!lease) {
     return (
       <View style={styles.centered}>
-        <Text style={styles.emptyText}>No active lease agreement found for your account.</Text>
+        <Text style={styles.emptyText}>No pending or active lease agreement found for your account.</Text>
       </View>
     );
   }
@@ -101,12 +106,19 @@ export default function TenantAgreementsScreen() {
             <Text style={styles.title}>{lease.properties?.title}</Text>
             <Text style={styles.sub}>{lease.properties?.location}</Text>
             {lease.units?.unit_number ? <Text style={styles.sub}>Unit {lease.units.unit_number}</Text> : null}
+            {lease.status === 'pending' ? <Text style={styles.pendingBadge}>PENDING PAYMENT</Text> : null}
           </View>
         </View>
 
         <View style={styles.row}>
-          <Text style={styles.label}>Rent Amount</Text>
+          <Text style={styles.label}>Monthly Rent</Text>
           <Text style={styles.value}>{formatPrice(lease.rent_amount)}</Text>
+        </View>
+        <View style={styles.row}>
+          <Text style={styles.label}>Lease Total</Text>
+          <Text style={styles.value}>
+            {formatPrice(leaseTotalRent(lease.rent_amount, lease.start_date, lease.end_date))}
+          </Text>
         </View>
         <View style={styles.row}>
           <Text style={styles.label}>Start Date</Text>
@@ -118,10 +130,12 @@ export default function TenantAgreementsScreen() {
         </View>
       </View>
 
-      {daysLeft !== null && daysLeft <= 30 ? (
+      {daysLeft !== null && daysLeft <= 30 && lease.status === 'active' ? (
         <View style={styles.warningCard}>
           <Calendar size={16} color="#EF4444" />
-          <Text style={styles.warningText}>Your lease expires in {daysLeft} day(s). Contact support for renewal guidance.</Text>
+          <Text style={styles.warningText}>
+            Your lease expires in {daysLeft} day(s). Use Feedback or Help for renewal guidance.
+          </Text>
         </View>
       ) : null}
 
@@ -158,6 +172,13 @@ const styles = StyleSheet.create({
   headerText: { marginLeft: 10, flex: 1 },
   title: { color: '#F8FAFC', fontSize: 16, fontWeight: 'bold' },
   sub: { color: '#94A3B8', fontSize: 13, marginTop: 2 },
+  pendingBadge: {
+    color: '#EAB308',
+    fontSize: 11,
+    fontWeight: '700',
+    marginTop: 6,
+    letterSpacing: 0.4,
+  },
   row: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 8 },
   label: { color: '#94A3B8', fontSize: 13 },
   value: { color: '#F8FAFC', fontWeight: '600' },

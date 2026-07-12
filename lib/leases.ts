@@ -1,0 +1,118 @@
+import { supabase } from './supabase';
+
+type OverlapCheckParams = {
+  propertyId: string;
+  unitId?: string | null;
+  startDate: string;
+  endDate: string;
+  excludeLeaseId?: string;
+};
+
+/** Full calendar months between YYYY-MM-DD lease dates (minimum 1). */
+export function leaseMonthCount(startDate: string, endDate: string): number {
+  const [sy, sm, sd] = startDate.split('-').map(Number);
+  const [ey, em, ed] = endDate.split('-').map(Number);
+  if (![sy, sm, sd, ey, em, ed].every((n) => Number.isFinite(n))) return 1;
+
+  let months = (ey - sy) * 12 + (em - sm);
+  if (ed < sd) months -= 1;
+  return Math.max(1, months);
+}
+
+/** Total rent owed for the lease term (monthly rate × month count). */
+export function leaseTotalRent(monthlyRent: number, startDate: string, endDate: string): number {
+  return Number(monthlyRent || 0) * leaseMonthCount(startDate, endDate);
+}
+
+/**
+ * Returns true when another pending/active lease overlaps the given
+ * unit (or whole-property rental when unitId is empty).
+ */
+export async function hasOverlappingLease(params: OverlapCheckParams): Promise<boolean> {
+  const { propertyId, unitId, startDate, endDate, excludeLeaseId } = params;
+
+  let query = supabase
+    .from('leases')
+    .select('id')
+    .in('status', ['pending', 'active'])
+    .lte('start_date', endDate)
+    .gte('end_date', startDate)
+    .limit(1);
+
+  if (unitId) {
+    query = query.eq('unit_id', unitId);
+  } else {
+    query = query.eq('property_id', propertyId).is('unit_id', null);
+  }
+
+  if (excludeLeaseId) {
+    query = query.neq('id', excludeLeaseId);
+  }
+
+  const { data, error } = await query;
+  if (error) throw error;
+  return (data?.length ?? 0) > 0;
+}
+
+export function leaseAssignErrorMessage(err: unknown): string {
+  const message =
+    typeof err === 'object' && err !== null && 'message' in err
+      ? String((err as { message: unknown }).message)
+      : String(err ?? '');
+
+  if (/overlapping pending or active lease/i.test(message) || /exclusion_violation/i.test(message)) {
+    return 'This space already has a pending or active lease for overlapping dates. Terminate or renew the existing agreement instead.';
+  }
+  return 'Failed to assign lease.';
+}
+
+/** Promote a client profile to tenant after lease assignment. Throws on failure. */
+export async function promoteClientToTenant(profileId: string, currentRole?: string): Promise<void> {
+  if (currentRole && currentRole !== 'client') return;
+
+  if (!currentRole) {
+    const { data: profile, error: fetchError } = await supabase
+      .from('profiles')
+      .select('role')
+      .eq('id', profileId)
+      .maybeSingle();
+    if (fetchError) throw fetchError;
+    if (!profile || profile.role !== 'client') return;
+  }
+
+  const { error } = await supabase.from('profiles').update({ role: 'tenant' }).eq('id', profileId);
+  if (error) throw error;
+}
+
+export type AssignableUnit = {
+  id: string;
+  unit_number: string;
+  rent_amount: number;
+};
+
+/**
+ * Vacant units for a property that do not already have a pending/active lease.
+ * Pending leases leave units marked vacant, so status alone is not enough.
+ */
+export async function fetchAssignableUnits(propertyId: string): Promise<AssignableUnit[]> {
+  const [{ data: units, error: unitsError }, { data: leases, error: leasesError }] = await Promise.all([
+    supabase
+      .from('units')
+      .select('id, unit_number, rent_amount')
+      .eq('property_id', propertyId)
+      .eq('status', 'vacant')
+      .order('unit_number', { ascending: true }),
+    supabase
+      .from('leases')
+      .select('unit_id')
+      .eq('property_id', propertyId)
+      .in('status', ['pending', 'active'])
+      .not('unit_id', 'is', null),
+  ]);
+
+  if (unitsError) throw unitsError;
+  if (leasesError) throw leasesError;
+
+  const blocked = new Set((leases || []).map((l) => l.unit_id).filter(Boolean) as string[]);
+  return ((units as AssignableUnit[]) || []).filter((u) => !blocked.has(u.id));
+}

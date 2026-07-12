@@ -60,8 +60,8 @@ const TOOLS: Tool[] = [
   },
   {
     route: '/(admin)/backup',
-    title: 'Backup & Recovery',
-    description: 'Create snapshots and recovery checkpoints',
+    title: 'Integrity Snapshots',
+    description: 'Record table row counts; real restores use the Supabase dashboard',
     icon: DatabaseBackup,
     financeAllowed: false,
   },
