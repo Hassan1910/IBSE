@@ -10,12 +10,17 @@ import {
   TextInput,
   Alert,
   ScrollView,
-  Image,
 } from 'react-native';
+import { Image } from 'expo-image';
 import { useUser } from '@clerk/clerk-expo';
+import { useQueryClient } from '@tanstack/react-query';
 import { supabase } from '../../lib/supabase';
 import { pickImages, uploadImage, type PickedImage } from '../../lib/storage';
 import { Plus, X, MapPin, Tag, Landmark, Edit2, Trash2, Camera, User } from 'lucide-react-native';
+import { useInfiniteList } from '../../hooks/queries/useInfiniteList';
+import { fetchAdminPropertiesPage } from '../../hooks/queries/fetchers';
+import { queryKeys } from '../../hooks/queries/keys';
+import { LIST_PERF, PAGE_SIZE } from '../../lib/queryClient';
 
 interface Property {
   id: string;
@@ -33,10 +38,23 @@ interface Property {
 
 export default function AdminPropertiesScreen() {
   const { user } = useUser();
-  const [properties, setProperties] = useState<Property[]>([]);
-  const [loading, setLoading] = useState(true);
+  const queryClient = useQueryClient();
   const [landlords, setLandlords] = useState<{ id: string; full_name: string; email: string }[]>([]);
   const [selectedLandlordId, setSelectedLandlordId] = useState<string | null>(null);
+
+  const {
+    items: properties,
+    loading,
+    refreshing,
+    loadingMore,
+    error,
+    refresh,
+    loadMore,
+  } = useInfiniteList<Property>(
+    queryKeys.adminProperties,
+    (page) => fetchAdminPropertiesPage(page) as unknown as Promise<Property[]>,
+    PAGE_SIZE.properties
+  );
 
   const [modalVisible, setModalVisible] = useState(false);
   const [title, setTitle] = useState('');
@@ -48,6 +66,16 @@ export default function AdminPropertiesScreen() {
   const [selectedImages, setSelectedImages] = useState<PickedImage[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
+
+  const invalidateProperties = () =>
+    queryClient.invalidateQueries({ queryKey: queryKeys.adminProperties });
+
+  useEffect(() => {
+    if (error) {
+      console.error('Fetch properties error:', error);
+      Alert.alert('Error', 'Failed to load property inventory.');
+    }
+  }, [error]);
 
   const resetForm = () => {
     setEditingId(null);
@@ -82,10 +110,10 @@ export default function AdminPropertiesScreen() {
         style: 'destructive',
         onPress: async () => {
           try {
-            const { error } = await supabase.from('properties').delete().eq('id', id);
-            if (error) throw error;
+            const { error: delError } = await supabase.from('properties').delete().eq('id', id);
+            if (delError) throw delError;
             Alert.alert('Success', 'Property deleted.');
-            setProperties((prev) => prev.filter((p) => p.id !== id));
+            await invalidateProperties();
           } catch (err) {
             console.error('Delete property error:', err);
             Alert.alert('Error', 'Failed to delete property.');
@@ -112,38 +140,19 @@ export default function AdminPropertiesScreen() {
 
   const fetchLandlords = async () => {
     try {
-      const { data, error } = await supabase
+      const { data, error: landlordsError } = await supabase
         .from('profiles')
         .select('id, full_name, email')
         .eq('role', 'landlord')
         .order('full_name', { ascending: true });
-      if (error) throw error;
+      if (landlordsError) throw landlordsError;
       setLandlords(data || []);
     } catch (err) {
       console.error('Fetch landlords error:', err);
     }
   };
 
-  const fetchProperties = async () => {
-    try {
-      setLoading(true);
-      const { data, error } = await supabase
-        .from('properties')
-        .select('*, profiles:owner_id ( full_name )')
-        .order('created_at', { ascending: false });
-
-      if (error) throw error;
-      setProperties(data || []);
-    } catch (err: any) {
-      console.error('Fetch properties error:', err);
-      Alert.alert('Error', 'Failed to load property inventory.');
-    } finally {
-      setLoading(false);
-    }
-  };
-
   useEffect(() => {
-    fetchProperties();
     fetchLandlords();
   }, []);
 
@@ -186,7 +195,7 @@ export default function AdminPropertiesScreen() {
       }
 
       if (editingId) {
-        const { error } = await supabase
+        const { error: updateError } = await supabase
           .from('properties')
           .update({
             title: title.trim(),
@@ -200,10 +209,10 @@ export default function AdminPropertiesScreen() {
           })
           .eq('id', editingId);
 
-        if (error) throw error;
+        if (updateError) throw updateError;
         Alert.alert('Success', 'Property updated successfully.');
       } else {
-        const { error } = await supabase.from('properties').insert({
+        const { error: insertError } = await supabase.from('properties').insert({
           title: title.trim(),
           description: description.trim(),
           type,
@@ -215,13 +224,13 @@ export default function AdminPropertiesScreen() {
           owner_id: selectedLandlordId,
         });
 
-        if (error) throw error;
+        if (insertError) throw insertError;
         Alert.alert('Success', 'New property listed successfully.');
       }
 
       setModalVisible(false);
       resetForm();
-      fetchProperties();
+      await invalidateProperties();
     } catch (err: any) {
       console.error('Property save error:', err);
       Alert.alert('Error', 'Failed to save property details.');
@@ -241,7 +250,7 @@ export default function AdminPropertiesScreen() {
 
   return (
     <View style={styles.container}>
-      {loading ? (
+      {loading && properties.length === 0 ? (
         <View style={styles.centered}>
           <ActivityIndicator size="large" color="#38BDF8" />
         </View>
@@ -250,10 +259,11 @@ export default function AdminPropertiesScreen() {
           <FlatList
             data={properties}
             keyExtractor={(item) => item.id}
+            {...LIST_PERF}
             renderItem={({ item }) => (
               <View style={styles.card}>
                 {item.image_urls?.[0] ? (
-                  <Image source={{ uri: item.image_urls[0] }} style={styles.cardImage} />
+                  <Image source={{ uri: item.image_urls[0] }} style={styles.cardImage} contentFit="cover" cachePolicy="memory-disk" />
                 ) : null}
 
                 <View style={styles.cardHeader}>
@@ -261,7 +271,11 @@ export default function AdminPropertiesScreen() {
                   <View
                     style={[
                       styles.statusBadge,
-                      item.status === 'available' ? styles.statusAvail : styles.statusRented,
+                      item.status === 'available'
+                        ? styles.statusAvail
+                        : item.status === 'sold'
+                          ? styles.statusSold
+                          : styles.statusRented,
                     ]}
                   >
                     <Text style={styles.statusText}>{item.status.toUpperCase()}</Text>
@@ -297,6 +311,39 @@ export default function AdminPropertiesScreen() {
                     <Edit2 size={14} color="#38BDF8" style={styles.actionIcon} />
                     <Text style={styles.actionBtnText}>Edit</Text>
                   </TouchableOpacity>
+                  {item.type === 'sale' && item.status === 'available' ? (
+                    <TouchableOpacity
+                      style={styles.actionBtn}
+                      onPress={() => {
+                        Alert.alert(
+                          'Mark as Sold',
+                          `Mark "${item.title}" as sold? It will leave the client marketplace.`,
+                          [
+                            { text: 'Cancel', style: 'cancel' },
+                            {
+                              text: 'Mark Sold',
+                              onPress: async () => {
+                                try {
+                                  const { error: soldError } = await supabase
+                                    .from('properties')
+                                    .update({ status: 'sold' })
+                                    .eq('id', item.id);
+                                  if (soldError) throw soldError;
+                                  Alert.alert('Success', 'Property marked as sold.');
+                                  await invalidateProperties();
+                                } catch (err: any) {
+                                  Alert.alert('Error', err.message || 'Failed to update status.');
+                                }
+                              },
+                            },
+                          ],
+                        );
+                      }}
+                    >
+                      <Tag size={14} color="#10B981" style={styles.actionIcon} />
+                      <Text style={[styles.actionBtnText, { color: '#10B981' }]}>Sold</Text>
+                    </TouchableOpacity>
+                  ) : null}
                   <TouchableOpacity
                     style={[styles.actionBtn, styles.deleteBtn]}
                     onPress={() => handleDelete(item.id)}
@@ -308,8 +355,17 @@ export default function AdminPropertiesScreen() {
               </View>
             )}
             contentContainerStyle={styles.listContainer}
-            onRefresh={fetchProperties}
-            refreshing={loading}
+            onRefresh={refresh}
+            refreshing={refreshing}
+            onEndReached={loadMore}
+            onEndReachedThreshold={0.4}
+            ListFooterComponent={
+              loadingMore ? (
+                <View style={styles.loadingMore}>
+                  <ActivityIndicator color="#38BDF8" />
+                </View>
+              ) : null
+            }
             ListEmptyComponent={
               <View style={styles.emptyCentered}>
                 <Landmark size={48} color="#94A3B8" style={styles.emptyIcon} />
@@ -431,24 +487,28 @@ export default function AdminPropertiesScreen() {
               </View>
 
               <View style={styles.inputGroup}>
-                <Text style={styles.label}>Select Owner (Landlord)</Text>
+                <Text style={styles.label}>
+                  {type === 'rental' ? 'Select Landlord (required)' : 'Select Owner (Landlord)'}
+                </Text>
                 <View style={styles.ownerGrid}>
-                  <TouchableOpacity
-                    style={[
-                      styles.ownerBtn,
-                      selectedLandlordId === null && styles.ownerBtnActive,
-                    ]}
-                    onPress={() => setSelectedLandlordId(null)}
-                  >
-                    <Text
+                  {type === 'sale' ? (
+                    <TouchableOpacity
                       style={[
-                        styles.ownerText,
-                        selectedLandlordId === null && styles.ownerTextActive,
+                        styles.ownerBtn,
+                        selectedLandlordId === null && styles.ownerBtnActive,
                       ]}
+                      onPress={() => setSelectedLandlordId(null)}
                     >
-                      Agency Owned (No Landlord)
-                    </Text>
-                  </TouchableOpacity>
+                      <Text
+                        style={[
+                          styles.ownerText,
+                          selectedLandlordId === null && styles.ownerTextActive,
+                        ]}
+                      >
+                        Agency Owned (No Landlord)
+                      </Text>
+                    </TouchableOpacity>
+                  ) : null}
                   {landlords.map((l) => (
                     <TouchableOpacity
                       key={l.id}
@@ -469,6 +529,11 @@ export default function AdminPropertiesScreen() {
                     </TouchableOpacity>
                   ))}
                 </View>
+                {type === 'rental' && landlords.length === 0 ? (
+                  <Text style={{ color: '#EAB308', fontSize: 12, marginTop: 8 }}>
+                    No landlords available. Invite a landlord before saving a rental.
+                  </Text>
+                ) : null}
               </View>
 
               {/* Image Picker */}
@@ -483,7 +548,7 @@ export default function AdminPropertiesScreen() {
                   >
                     {selectedImages.map((img, index) => (
                       <View key={`${img.uri}-${index}`} style={styles.imagePreviewWrapper}>
-                        <Image source={{ uri: img.uri }} style={styles.imagePreview} />
+                        <Image source={{ uri: img.uri }} style={styles.imagePreview} contentFit="cover" />
                         <TouchableOpacity
                           style={styles.imageRemoveBtn}
                           onPress={() => handleRemoveImage(index)}
@@ -572,6 +637,9 @@ const styles = StyleSheet.create({
   statusRented: {
     backgroundColor: 'rgba(56, 189, 248, 0.15)',
   },
+  statusSold: {
+    backgroundColor: 'rgba(16, 185, 129, 0.2)',
+  },
   statusText: {
     fontSize: 10,
     fontWeight: 'bold',
@@ -656,6 +724,10 @@ const styles = StyleSheet.create({
   centered: {
     flex: 1,
     justifyContent: 'center',
+    alignItems: 'center',
+  },
+  loadingMore: {
+    paddingVertical: 16,
     alignItems: 'center',
   },
   emptyCentered: {

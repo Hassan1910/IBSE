@@ -22,9 +22,11 @@ import {
   leaseAssignErrorMessage,
   promoteClientToTenant,
 } from '../../lib/leases';
+import { pickDocument, uploadContract, uploadLeaseDocumentFile } from '../../lib/storage';
 import DatePickerModal from '../../components/DatePickerModal';
-import { Plus, X, FileText, Calendar, User as UserIcon, RefreshCw, Ban, Link as LinkIcon } from 'lucide-react-native';
+import { Plus, X, FileText, Calendar, User as UserIcon, RefreshCw, Ban, Link as LinkIcon, Upload, MessageSquare } from 'lucide-react-native';
 import NotificationBell from '../../components/NotificationBell';
+import { useRouter } from 'expo-router';
 
 interface Lease {
   id: string;
@@ -34,6 +36,8 @@ interface Lease {
   start_date: string;
   end_date: string;
   rent_amount: number;
+  deposit_amount?: number;
+  deposit_status?: string;
   status: 'pending' | 'active' | 'terminated' | 'expired';
   terms: string | null;
   contract_url: string | null;
@@ -53,6 +57,7 @@ const todayISODate = () => {
 
 export default function LandlordAgreements() {
   const { user } = useUser();
+  const router = useRouter();
   const [leases, setLeases] = useState<Lease[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -68,8 +73,10 @@ export default function LandlordAgreements() {
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
   const [rentAmount, setRentAmount] = useState('');
+  const [depositAmount, setDepositAmount] = useState('');
   const [terms, setTerms] = useState('');
   const [contractUrl, setContractUrl] = useState('');
+  const [uploadingContract, setUploadingContract] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
   // Renew modal
@@ -86,7 +93,7 @@ export default function LandlordAgreements() {
       setLoading(true);
       const { data, error } = await supabase
         .from('leases')
-        .select('id, property_id, unit_id, tenant_id, start_date, end_date, rent_amount, status, terms, contract_url, properties!inner ( title, owner_id ), profiles:tenant_id ( full_name )')
+        .select('id, property_id, unit_id, tenant_id, start_date, end_date, rent_amount, deposit_amount, deposit_status, status, terms, contract_url, properties!inner ( title, owner_id ), profiles:tenant_id ( full_name )')
         .eq('properties.owner_id', user.id)
         .order('start_date', { ascending: false });
       if (error) throw error;
@@ -117,15 +124,11 @@ export default function LandlordAgreements() {
     setProperties((props as any) || []);
   }, [user?.id]);
 
-  useEffect(() => {
-    fetchLeases();
-    fetchOptions();
-  }, [fetchLeases, fetchOptions]);
-
   useFocusEffect(
     useCallback(() => {
       fetchLeases();
-    }, [fetchLeases])
+      fetchOptions();
+    }, [fetchLeases, fetchOptions])
   );
 
   // Load units whenever the selected property changes.
@@ -152,6 +155,7 @@ export default function LandlordAgreements() {
     setStartDate(todayISODate());
     setEndDate('');
     setRentAmount('');
+    setDepositAmount('');
     setTerms('');
     setContractUrl('');
   };
@@ -161,9 +165,14 @@ export default function LandlordAgreements() {
       Alert.alert('Validation Error', 'Please select a tenant, property, dates and rent amount.');
       return;
     }
-    const rent = parseFloat(rentAmount);
+      const rent = parseFloat(rentAmount);
     if (isNaN(rent) || rent <= 0) {
       Alert.alert('Validation Error', 'Please enter a valid rent amount.');
+      return;
+    }
+    const deposit = depositAmount.trim() ? parseFloat(depositAmount) : 0;
+    if (isNaN(deposit) || deposit < 0) {
+      Alert.alert('Validation Error', 'Please enter a valid deposit amount (or leave blank).');
       return;
     }
     if (endDate < startDate) {
@@ -192,7 +201,7 @@ export default function LandlordAgreements() {
         return;
       }
 
-      const { error: leaseError } = await supabase.from('leases').insert({
+      const { data: createdLease, error: leaseError } = await supabase.from('leases').insert({
         property_id: selectedProperty,
         unit_id: selectedUnit || null,
         tenant_id: selectedTenant,
@@ -200,11 +209,23 @@ export default function LandlordAgreements() {
         start_date: startDate,
         end_date: endDate,
         rent_amount: rent,
+        deposit_amount: deposit,
+        deposit_status: deposit > 0 ? 'due' : 'none',
         terms: terms.trim() || null,
         contract_url: contractUrl.trim() || null,
         status: 'pending',
-      });
+      }).select('id').single();
       if (leaseError) throw leaseError;
+
+      if (createdLease?.id && contractUrl.trim()) {
+        await supabase.from('lease_documents').insert({
+          lease_id: createdLease.id,
+          doc_type: 'contract',
+          title: 'Lease contract',
+          file_url: contractUrl.trim(),
+          uploaded_by: user.id,
+        });
+      }
 
       const tenantProfile = tenants.find((t) => t.id === selectedTenant);
       await promoteClientToTenant(selectedTenant, tenantProfile?.role);
@@ -306,6 +327,8 @@ export default function LandlordAgreements() {
           start_date: renewalStart,
           end_date: renewEndDate,
           rent_amount: renewLease.rent_amount,
+          deposit_amount: renewLease.deposit_amount || 0,
+          deposit_status: (renewLease.deposit_amount || 0) > 0 ? 'due' : 'none',
           terms: renewLease.terms,
           contract_url: renewLease.contract_url,
           status: 'pending',
@@ -391,6 +414,33 @@ export default function LandlordAgreements() {
     ]);
   };
 
+  const handleUploadVaultDoc = async (lease: Lease) => {
+    if (!user?.id) return;
+    try {
+      const doc = await pickDocument();
+      if (!doc) return;
+      const safeName = doc.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+      const path = `${user.id}/${lease.id}/${Date.now()}_${safeName}`;
+      const url = await uploadLeaseDocumentFile(path, doc);
+      const { error } = await supabase.from('lease_documents').insert({
+        lease_id: lease.id,
+        doc_type: doc.mimeType === 'application/pdf' ? 'other' : 'inspection',
+        title: doc.name || 'Lease document',
+        file_url: url,
+        uploaded_by: user.id,
+      });
+      if (error) throw error;
+      if (!lease.contract_url) {
+        await supabase.from('leases').update({ contract_url: url }).eq('id', lease.id);
+      }
+      Alert.alert('Uploaded', 'Document added to the lease vault.');
+      fetchLeases();
+    } catch (err: any) {
+      console.error('Upload lease document error:', err);
+      Alert.alert('Error', err.message || 'Failed to upload document.');
+    }
+  };
+
   const formatPrice = (p: number) =>
     new Intl.NumberFormat('en-KE', { style: 'currency', currency: 'KES', maximumFractionDigits: 0 }).format(p);
   const formatDate = (d: string) => new Date(d).toLocaleDateString('en-KE', { year: 'numeric', month: 'short', day: 'numeric' });
@@ -433,6 +483,11 @@ export default function LandlordAgreements() {
                   <Text style={styles.infoText}>{formatDate(item.start_date)} - {formatDate(item.end_date)}</Text>
                 </View>
                 <Text style={styles.rent}>{formatPrice(item.rent_amount)}/month</Text>
+                {item.deposit_amount && item.deposit_amount > 0 ? (
+                  <Text style={styles.infoText}>
+                    Deposit: {formatPrice(item.deposit_amount)} ({item.deposit_status || 'due'})
+                  </Text>
+                ) : null}
 
                 {item.terms ? (
                   <View style={styles.termsBox}>
@@ -459,6 +514,21 @@ export default function LandlordAgreements() {
 
                 {item.status === 'active' || item.status === 'pending' || item.status === 'expired' ? (
                   <View style={styles.actionRow}>
+                    {item.status === 'active' || item.status === 'pending' ? (
+                      <TouchableOpacity
+                        style={styles.actionBtn}
+                        onPress={() =>
+                          router.push({ pathname: '/(landlord)/messages', params: { leaseId: item.id } })
+                        }
+                      >
+                        <MessageSquare size={14} color="#38BDF8" style={styles.actionIcon} />
+                        <Text style={styles.actionBtnText}>Message</Text>
+                      </TouchableOpacity>
+                    ) : null}
+                    <TouchableOpacity style={styles.actionBtn} onPress={() => handleUploadVaultDoc(item)}>
+                      <Upload size={14} color="#38BDF8" style={styles.actionIcon} />
+                      <Text style={styles.actionBtnText}>Add Doc</Text>
+                    </TouchableOpacity>
                     {item.status === 'active' || item.status === 'expired' ? (
                       <TouchableOpacity style={styles.actionBtn} onPress={() => openRenew(item)}>
                         <RefreshCw size={14} color="#38BDF8" style={styles.actionIcon} />
@@ -626,10 +696,22 @@ export default function LandlordAgreements() {
               </View>
 
               <View style={styles.inputGroup}>
+                <Text style={styles.label}>Security Deposit (KES, optional)</Text>
+                <TextInput
+                  style={styles.modalInput}
+                  placeholder="e.g. 50000"
+                  placeholderTextColor="#999"
+                  value={depositAmount}
+                  onChangeText={setDepositAmount}
+                  keyboardType="numeric"
+                />
+              </View>
+
+              <View style={styles.inputGroup}>
                 <Text style={styles.label}>Terms & Conditions (optional)</Text>
                 <TextInput
                   style={[styles.modalInput, styles.textArea]}
-                  placeholder="e.g. Deposit of 2 months, no subletting..."
+                  placeholder="e.g. No subletting, pets by approval..."
                   placeholderTextColor="#999"
                   value={terms}
                   onChangeText={setTerms}
@@ -640,15 +722,46 @@ export default function LandlordAgreements() {
               </View>
 
               <View style={styles.inputGroup}>
-                <Text style={styles.label}>Contract URL (optional)</Text>
+                <Text style={styles.label}>Contract (optional)</Text>
                 <TextInput
                   style={styles.modalInput}
-                  placeholder="https://... (uploaded contract link)"
+                  placeholder="https://... or upload a PDF/image"
                   placeholderTextColor="#999"
                   value={contractUrl}
                   onChangeText={setContractUrl}
                   autoCapitalize="none"
                 />
+                <TouchableOpacity
+                  style={styles.uploadBtn}
+                  disabled={uploadingContract || !user?.id}
+                  onPress={async () => {
+                    if (!user?.id) return;
+                    try {
+                      setUploadingContract(true);
+                      const doc = await pickDocument();
+                      if (!doc) return;
+                      const safeName = doc.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+                      const path = `${user.id}/${Date.now()}_${safeName}`;
+                      const url = await uploadContract(path, doc);
+                      setContractUrl(url);
+                      Alert.alert('Uploaded', 'Contract file uploaded. It will be saved with the lease.');
+                    } catch (err: any) {
+                      console.error('Contract upload error:', err);
+                      Alert.alert('Upload Failed', err.message || 'Could not upload contract.');
+                    } finally {
+                      setUploadingContract(false);
+                    }
+                  }}
+                >
+                  {uploadingContract ? (
+                    <ActivityIndicator color="#38BDF8" />
+                  ) : (
+                    <>
+                      <Upload size={16} color="#38BDF8" style={{ marginRight: 8 }} />
+                      <Text style={styles.uploadBtnText}>Upload PDF / Image</Text>
+                    </>
+                  )}
+                </TouchableOpacity>
               </View>
 
               <TouchableOpacity style={styles.submitBtn} onPress={handleCreate} disabled={submitting}>
@@ -868,4 +981,16 @@ const styles = StyleSheet.create({
   errorText: { color: '#EF4444', fontSize: 13 },
   submitBtn: { backgroundColor: '#38BDF8', borderRadius: 8, paddingVertical: 14, alignItems: 'center', marginTop: 10 },
   submitBtnText: { color: '#0F172A', fontWeight: 'bold', fontSize: 16 },
+  uploadBtn: {
+    marginTop: 10,
+    borderWidth: 1,
+    borderColor: '#334155',
+    borderRadius: 8,
+    paddingVertical: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#0F172A',
+  },
+  uploadBtnText: { color: '#38BDF8', fontWeight: '600' },
 });

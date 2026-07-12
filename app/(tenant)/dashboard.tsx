@@ -1,11 +1,13 @@
-import React, { useCallback, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo } from 'react';
 import { View, Text, StyleSheet, ActivityIndicator, Alert, ScrollView, RefreshControl, TouchableOpacity } from 'react-native';
 import { useFocusEffect, useRouter } from 'expo-router';
-import { supabase } from '../../lib/supabase';
-import { leaseTotalRent } from '../../lib/leases';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { leaseTotalRent, fetchLeaseBalance } from '../../lib/leases';
 import { useUser } from '@clerk/clerk-expo';
 import { Calendar, CreditCard, DollarSign, FileText, HelpCircle, Home, MessageSquare, Wrench } from 'lucide-react-native';
 import { useNotifications } from '../../hooks/useNotifications';
+import { fetchTenantDashboard } from '../../hooks/queries/fetchers';
+import { queryKeys } from '../../hooks/queries/keys';
 
 interface Lease {
   id: string;
@@ -36,85 +38,58 @@ interface Payment {
 export default function TenantDashboard() {
   const router = useRouter();
   const { user } = useUser();
+  const queryClient = useQueryClient();
   const { refreshUnreadCount } = useNotifications();
-  const [activeLease, setActiveLease] = useState<Lease | null>(null);
-  const [pendingLease, setPendingLease] = useState<Lease | null>(null);
-  const [payments, setPayments] = useState<Payment[]>([]);
-  const [openMaintenance, setOpenMaintenance] = useState(0);
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
-  const hasLoadedRef = useRef(false);
+  const userId = user?.id || '';
 
-  const fetchData = useCallback(async (opts?: { silent?: boolean }) => {
-    if (!user) return;
+  const dashboardQuery = useQuery({
+    queryKey: queryKeys.tenantDashboard(userId),
+    queryFn: () => fetchTenantDashboard(userId),
+    enabled: !!userId,
+  });
 
-    try {
-      if (opts?.silent) {
-        setRefreshing(true);
-      } else {
-        setLoading(true);
-      }
-      const [leaseRes, payRes, maintRes] = await Promise.all([
-        supabase
-          .from('leases')
-          .select(`
-            id,
-            start_date,
-            end_date,
-            rent_amount,
-            status,
-            contract_url,
-            terms,
-            unit_id,
-            properties ( title, location ),
-            units ( unit_number )
-          `)
-          .eq('tenant_id', user.id)
-          .in('status', ['pending', 'active'])
-          .order('start_date', { ascending: false }),
-        supabase
-          .from('payments')
-          .select('id, amount, payment_date, payment_method, reference_code, status, lease_id')
-          .eq('payer_id', user.id)
-          .order('payment_date', { ascending: false }),
-        supabase
-          .from('maintenance_requests')
-          .select('*', { count: 'exact', head: true })
-          .eq('tenant_id', user.id)
-          .neq('status', 'resolved'),
-      ]);
-
-      if (leaseRes.error) throw leaseRes.error;
-      if (payRes.error) throw payRes.error;
-      if (maintRes.error) throw maintRes.error;
-
-      const leases = (leaseRes.data as any as Lease[]) || [];
-      setActiveLease(leases.find((l) => l.status === 'active') || null);
-      setPendingLease(leases.find((l) => l.status === 'pending') || null);
-      setPayments((payRes.data as any) || []);
-      setOpenMaintenance(maintRes.count || 0);
-    } catch (err: any) {
-      console.error('Fetch tenant data error:', err);
-      Alert.alert('Error', 'Failed to load lease and payment details.');
-    } finally {
-      hasLoadedRef.current = true;
-      setLoading(false);
-      setRefreshing(false);
-    }
-  }, [user]);
-
-  // Tab screens stay mounted, so refetch whenever this screen is focused
-  // (e.g. after submitting a payment or maintenance request on another tab).
   useFocusEffect(
     useCallback(() => {
-      fetchData({ silent: hasLoadedRef.current });
-      refreshUnreadCount();
-    }, [fetchData, refreshUnreadCount])
+      if (!userId) return;
+      void refreshUnreadCount();
+      const state = queryClient.getQueryState(queryKeys.tenantDashboard(userId));
+      const age = state?.dataUpdatedAt ? Date.now() - state.dataUpdatedAt : Infinity;
+      if (age > 30_000) {
+        void queryClient.invalidateQueries({ queryKey: queryKeys.tenantDashboard(userId) });
+      }
+    }, [queryClient, userId, refreshUnreadCount])
   );
 
+  useEffect(() => {
+    if (dashboardQuery.isError) {
+      console.error('Fetch tenant data error:', dashboardQuery.error);
+      Alert.alert('Error', 'Failed to load lease and payment details.');
+    }
+  }, [dashboardQuery.isError, dashboardQuery.error]);
+
+  const leases = (dashboardQuery.data?.leases as any as Lease[]) || [];
+  const payments = (dashboardQuery.data?.payments as any as Payment[]) || [];
+  const openMaintenance = dashboardQuery.data?.openMaintenance ?? 0;
+  const activeLease = leases.find((l) => l.status === 'active') || null;
+  const pendingLease = leases.find((l) => l.status === 'pending') || null;
+  const balanceLeaseId = activeLease?.id || pendingLease?.id || null;
+
+  const balanceQuery = useQuery({
+    queryKey: ['tenant', 'balance', balanceLeaseId],
+    queryFn: () => fetchLeaseBalance(balanceLeaseId!),
+    enabled: !!balanceLeaseId,
+  });
+
+  const loading = dashboardQuery.isLoading && !dashboardQuery.data;
+  const refreshing = dashboardQuery.isRefetching && !dashboardQuery.isLoading;
+
   const onRefresh = useCallback(async () => {
-    await Promise.all([fetchData({ silent: true }), refreshUnreadCount()]);
-  }, [fetchData, refreshUnreadCount]);
+    await Promise.all([
+      dashboardQuery.refetch(),
+      balanceQuery.refetch(),
+      refreshUnreadCount(),
+    ]);
+  }, [dashboardQuery, balanceQuery, refreshUnreadCount]);
 
   const formatPrice = (price: number) =>
     new Intl.NumberFormat('en-KE', { style: 'currency', currency: 'KES', maximumFractionDigits: 0 }).format(price);
@@ -133,20 +108,23 @@ export default function TenantDashboard() {
     }
   };
 
-  const leaseTotal = useMemo(() => {
-    if (!activeLease) return 0;
-    return leaseTotalRent(activeLease.rent_amount, activeLease.start_date, activeLease.end_date);
-  }, [activeLease]);
+  const currentLease = activeLease || pendingLease;
+  const currentLeaseId = currentLease?.id || null;
 
-  const verifiedPaymentsTotal = useMemo(() => {
-    if (!activeLease) return 0;
-    return payments
-      .filter((p) => p.status === 'verified' && p.lease_id === activeLease.id)
-      .reduce((sum, p) => sum + Number(p.amount), 0);
-  }, [payments, activeLease]);
+  const leaseTotal = balanceQuery.data?.charges_total
+    ?? (currentLease
+      ? leaseTotalRent(currentLease.rent_amount, currentLease.start_date, currentLease.end_date)
+      : 0);
 
-  const outstandingBalance = Math.max(leaseTotal - verifiedPaymentsTotal, 0);
-  const currentLeaseId = activeLease?.id || pendingLease?.id || null;
+  const verifiedPaymentsTotal = balanceQuery.data?.paid_total
+    ?? (currentLease
+      ? payments
+          .filter((p) => p.status === 'verified' && p.lease_id === currentLease.id)
+          .reduce((sum, p) => sum + Number(p.amount), 0)
+      : 0);
+
+  const outstandingBalance = balanceQuery.data?.outstanding
+    ?? Math.max(leaseTotal - verifiedPaymentsTotal, 0);
   const leaseScopedPayments = useMemo(() => {
     if (!currentLeaseId) return payments;
     return payments.filter((p) => p.lease_id === currentLeaseId);
@@ -178,13 +156,13 @@ export default function TenantDashboard() {
       <View style={styles.statsGrid}>
         <View style={styles.statCard}>
           <DollarSign size={16} color="#38BDF8" />
-          <Text style={styles.statLabel}>Lease Total</Text>
-          <Text style={styles.statValue}>{activeLease ? formatPrice(leaseTotal) : 'N/A'}</Text>
+          <Text style={styles.statLabel}>Charges Total</Text>
+          <Text style={styles.statValue}>{balanceLeaseId ? formatPrice(leaseTotal) : 'N/A'}</Text>
         </View>
         <View style={styles.statCard}>
           <CreditCard size={16} color="#EAB308" />
           <Text style={styles.statLabel}>Outstanding</Text>
-          <Text style={[styles.statValue, { color: outstandingBalance > 0 ? '#EAB308' : '#10B981' }]}>{activeLease ? formatPrice(outstandingBalance) : 'N/A'}</Text>
+          <Text style={[styles.statValue, { color: outstandingBalance > 0 ? '#EAB308' : '#10B981' }]}>{balanceLeaseId ? formatPrice(outstandingBalance) : 'N/A'}</Text>
         </View>
         <View style={styles.statCard}>
           <Wrench size={16} color={openMaintenance > 0 ? '#EAB308' : '#10B981'} />
@@ -209,6 +187,10 @@ export default function TenantDashboard() {
         <TouchableOpacity style={styles.quickCard} onPress={() => router.push('/(tenant)/documents')}>
           <FileText size={16} color="#10B981" />
           <Text style={styles.quickText}>Documents</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.quickCard} onPress={() => router.push('/(tenant)/messages')}>
+          <MessageSquare size={16} color="#38BDF8" />
+          <Text style={styles.quickText}>Messages</Text>
         </TouchableOpacity>
         <TouchableOpacity style={styles.quickCard} onPress={() => router.push('/(tenant)/feedback')}>
           <MessageSquare size={16} color="#EAB308" />

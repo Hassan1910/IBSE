@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import {
   View,
   Text,
@@ -7,14 +7,21 @@ import {
   TouchableOpacity,
   ActivityIndicator,
   Alert,
+  Linking,
 } from 'react-native';
-import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
+import { useLocalSearchParams, useRouter } from 'expo-router';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { supabase } from '../../lib/supabase';
 import { useUser } from '@clerk/clerk-expo';
 import { logAudit } from '../../lib/audit';
 import { notifyUser } from '../../lib/notifications';
-import { CreditCard, User as UserIcon, Check, X, Bell, Wallet } from 'lucide-react-native';
+import { generateAndAttachReceipt } from '../../lib/receipts';
+import { CreditCard, User as UserIcon, Check, X, Bell, Wallet, ExternalLink } from 'lucide-react-native';
 import NotificationBell from '../../components/NotificationBell';
+import { useInfiniteList } from '../../hooks/queries/useInfiniteList';
+import { fetchLandlordDashboardStats, fetchLandlordPaymentsPage } from '../../hooks/queries/fetchers';
+import { queryKeys } from '../../hooks/queries/keys';
+import { PAGE_SIZE } from '../../lib/queryClient';
 
 interface Payment {
   id: string;
@@ -24,6 +31,8 @@ interface Payment {
   reference_code: string;
   payment_date: string;
   status: 'pending' | 'verified' | 'failed';
+  proof_url?: string | null;
+  receipt_url?: string | null;
   profiles: { full_name: string; email: string } | null;
   leases: { properties: { title: string } | null } | null;
 }
@@ -33,74 +42,49 @@ type Filter = 'pending' | 'verified' | 'all';
 export default function LandlordPayments() {
   const { user } = useUser();
   const router = useRouter();
+  const queryClient = useQueryClient();
   const { id: focusId } = useLocalSearchParams<{ id?: string }>();
-  const [payments, setPayments] = useState<Payment[]>([]);
-  const [loading, setLoading] = useState(true);
+  const userId = user?.id || '';
   const [filter, setFilter] = useState<Filter>('pending');
-  const [totals, setTotals] = useState({ collected: 0, pending: 0 });
   const [highlightedId, setHighlightedId] = useState<string | null>(null);
   const listRef = useRef<FlatList<Payment>>(null);
 
-  const fetchPayments = useCallback(async () => {
-    if (!user?.id) return;
-    try {
-      setLoading(true);
+  const {
+    items: payments,
+    loading,
+    refreshing,
+    loadingMore,
+    error,
+    refresh,
+    loadMore,
+  } = useInfiniteList<Payment>(
+    queryKeys.landlordPayments(userId),
+    (page) => fetchLandlordPaymentsPage(userId, page) as any,
+    PAGE_SIZE.tables,
+    { enabled: !!userId, refetchOnFocus: true }
+  );
 
-      const { data: ownedProps, error: propsError } = await supabase
-        .from('properties')
-        .select('id')
-        .eq('owner_id', user.id);
-      if (propsError) throw propsError;
+  // Totals from the landlord stats RPC (avoids summing an unbounded payment download).
+  const totalsQuery = useQuery({
+    queryKey: queryKeys.landlordDashboard(userId),
+    queryFn: () => fetchLandlordDashboardStats(userId),
+    enabled: !!userId,
+  });
 
-      const propIds = (ownedProps || []).map((p) => p.id);
-      if (propIds.length === 0) {
-        setPayments([]);
-        setTotals({ collected: 0, pending: 0 });
-        return;
-      }
-
-      const { data: ownedLeases, error: leasesError } = await supabase
-        .from('leases')
-        .select('id')
-        .in('property_id', propIds);
-      if (leasesError) throw leasesError;
-
-      const leaseIds = (ownedLeases || []).map((l) => l.id);
-      if (leaseIds.length === 0) {
-        setPayments([]);
-        setTotals({ collected: 0, pending: 0 });
-        return;
-      }
-
-      const { data, error } = await supabase
-        .from('payments')
-        .select('id, payer_id, amount, payment_method, reference_code, payment_date, status, profiles:payer_id ( full_name, email ), leases ( properties ( title ) )')
-        .in('lease_id', leaseIds)
-        .order('payment_date', { ascending: false });
-      if (error) throw error;
-      const rows = (data as any as Payment[]) || [];
-      setPayments(rows);
-
-      const collected = rows.filter((p) => p.status === 'verified').reduce((a, p) => a + Number(p.amount), 0);
-      const pending = rows.filter((p) => p.status === 'pending').reduce((a, p) => a + Number(p.amount), 0);
-      setTotals({ collected, pending });
-    } catch (err) {
-      console.error('Fetch payments error:', err);
-      Alert.alert('Error', 'Failed to load payments.');
-    } finally {
-      setLoading(false);
-    }
-  }, [user?.id]);
+  const totals = useMemo(
+    () => ({
+      collected: Number(totalsQuery.data?.verified_collected ?? 0),
+      pending: Number(totalsQuery.data?.pending_payments ?? 0),
+    }),
+    [totalsQuery.data]
+  );
 
   useEffect(() => {
-    fetchPayments();
-  }, [fetchPayments]);
-
-  useFocusEffect(
-    useCallback(() => {
-      fetchPayments();
-    }, [fetchPayments])
-  );
+    if (error) {
+      console.error('Fetch payments error:', error);
+      Alert.alert('Error', 'Failed to load payments.');
+    }
+  }, [error]);
 
   useEffect(() => {
     if (!focusId || loading) return;
@@ -120,12 +104,37 @@ export default function LandlordPayments() {
     }
   }, [focusId, loading, payments, router]);
 
+  const invalidatePayments = () =>
+    Promise.all([
+      queryClient.invalidateQueries({ queryKey: ['landlord', 'payments', userId] }),
+      queryClient.invalidateQueries({ queryKey: queryKeys.landlordDashboard(userId) }),
+    ]);
+
+  const openUrl = async (url: string) => {
+    try {
+      await Linking.openURL(url);
+    } catch {
+      Alert.alert('Cannot Open', 'This link is not valid.');
+    }
+  };
+
   const handleVerify = async (id: string, action: 'verified' | 'failed') => {
     try {
       const current = payments.find((p) => p.id === id);
-      const { error } = await supabase.from('payments').update({ status: action }).eq('id', id);
-      if (error) throw error;
+      const { error: updateError } = await supabase.from('payments').update({ status: action }).eq('id', id);
+      if (updateError) throw updateError;
       logAudit({ actorId: user?.id || '', action: 'update', entityType: 'payment', entityId: id, description: `Payment marked ${action}` });
+      if (action === 'verified' && current) {
+        await generateAndAttachReceipt({
+          id: current.id,
+          amount: current.amount,
+          payment_method: current.payment_method,
+          reference_code: current.reference_code,
+          payment_date: current.payment_date,
+          payer_name: current.profiles?.full_name,
+          property_title: current.leases?.properties?.title,
+        });
+      }
       if (current?.payer_id) {
         await notifyUser({
           userId: current.payer_id,
@@ -145,7 +154,7 @@ export default function LandlordPayments() {
           ? 'Payment verified. If this was the first payment on a pending lease, the lease is now active.'
           : 'Payment marked as failed.'
       );
-      fetchPayments();
+      await invalidatePayments();
     } catch (err) {
       console.error('Verify payment error:', err);
       Alert.alert('Error', 'Failed to update payment status.');
@@ -226,7 +235,7 @@ export default function LandlordPayments() {
 
   return (
     <View style={styles.container}>
-      {loading ? (
+      {loading && payments.length === 0 ? (
         <View style={styles.centered}>
           <ActivityIndicator size="large" color="#38BDF8" />
         </View>
@@ -268,6 +277,19 @@ export default function LandlordPayments() {
 
               <Text style={styles.dateText}>Submitted: {formatDate(item.payment_date)}</Text>
 
+              {item.proof_url ? (
+                <TouchableOpacity style={styles.linkRow} onPress={() => openUrl(item.proof_url!)}>
+                  <ExternalLink size={14} color="#38BDF8" style={styles.btnIcon} />
+                  <Text style={styles.linkText}>View payment proof</Text>
+                </TouchableOpacity>
+              ) : null}
+              {item.receipt_url ? (
+                <TouchableOpacity style={styles.linkRow} onPress={() => openUrl(item.receipt_url!)}>
+                  <ExternalLink size={14} color="#10B981" style={styles.btnIcon} />
+                  <Text style={[styles.linkText, { color: '#10B981' }]}>Open PDF receipt</Text>
+                </TouchableOpacity>
+              ) : null}
+
               {item.status === 'pending' ? (
                 <>
                   <View style={styles.actionRow}>
@@ -289,8 +311,17 @@ export default function LandlordPayments() {
             </View>
           )}
           contentContainerStyle={styles.listContainer}
-          onRefresh={fetchPayments}
-          refreshing={loading}
+          onRefresh={refresh}
+          refreshing={refreshing}
+          onEndReached={loadMore}
+          onEndReachedThreshold={0.4}
+          ListFooterComponent={
+            loadingMore ? (
+              <View style={styles.footerLoader}>
+                <ActivityIndicator color="#38BDF8" />
+              </View>
+            ) : null
+          }
           ListEmptyComponent={
             <View style={styles.emptyCentered}>
               <CreditCard size={48} color="#94A3B8" style={styles.emptyIcon} />
@@ -361,8 +392,10 @@ const styles = StyleSheet.create({
   icon: { marginRight: 10 },
   clientName: { color: '#F8FAFC', fontSize: 14, fontWeight: '600' },
   clientEmail: { color: '#94A3B8', fontSize: 12 },
-  dateText: { fontSize: 11, color: '#64748B', marginBottom: 14 },
-  actionRow: { flexDirection: 'row', justifyContent: 'space-between' },
+  dateText: { fontSize: 11, color: '#64748B', marginBottom: 10 },
+  linkRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 8 },
+  linkText: { color: '#38BDF8', fontSize: 12, fontWeight: '600' },
+  actionRow: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 6 },
   actionBtn: {
     flex: 1,
     flexDirection: 'row',
@@ -387,6 +420,7 @@ const styles = StyleSheet.create({
   },
   reminderText: { color: '#94A3B8', fontSize: 12, fontWeight: '500' },
   centered: { flex: 1, justifyContent: 'center', alignItems: 'center' },
+  footerLoader: { paddingVertical: 16, alignItems: 'center' },
   emptyCentered: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 24, marginTop: 60 },
   emptyIcon: { marginBottom: 12 },
   emptyText: { color: '#94A3B8', fontSize: 14, textAlign: 'center' },

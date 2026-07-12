@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import {
   View,
   Text,
@@ -14,7 +14,13 @@ import {
 import { supabase } from '../../lib/supabase';
 import { useUser } from '@clerk/clerk-expo';
 import { useAudit } from '../../hooks/useAudit';
-import { Plus, X, Trash2, Edit2, TrendingUp, TrendingDown, Wallet } from 'lucide-react-native';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useInfiniteList } from '../../hooks/queries/useInfiniteList';
+import { fetchExpensesPage, fetchVerifiedRevenueSum, fetchTotalExpensesSum } from '../../hooks/queries/fetchers';
+import { queryKeys } from '../../hooks/queries/keys';
+import { PAGE_SIZE, LIST_PERF } from '../../lib/queryClient';
+import DatePickerModal from '../../components/DatePickerModal';
+import { Plus, X, Trash2, Edit2, TrendingUp, TrendingDown, Wallet, Calendar } from 'lucide-react-native';
 
 type ExpenseCategory = 'maintenance' | 'utilities' | 'salaries' | 'supplies' | 'marketing' | 'other';
 
@@ -38,10 +44,30 @@ const CATEGORIES: ExpenseCategory[] = [
 export default function AdminFinancesScreen() {
   const { user } = useUser();
   const { log } = useAudit();
+  const queryClient = useQueryClient();
 
-  const [expenses, setExpenses] = useState<Expense[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [revenue, setRevenue] = useState(0);
+  const revenueQuery = useQuery({
+    queryKey: [...queryKeys.adminFinances, 'revenue'],
+    queryFn: fetchVerifiedRevenueSum,
+  });
+
+  const expensesSumQuery = useQuery({
+    queryKey: [...queryKeys.adminFinances, 'expensesSum'],
+    queryFn: fetchTotalExpensesSum,
+  });
+
+  const {
+    items: expenses,
+    loading,
+    refreshing: listRefreshing,
+    loadingMore,
+    loadMore,
+    error: expensesError,
+  } = useInfiniteList<Expense>(
+    [...queryKeys.adminFinances, 'expenses'],
+    (page) => fetchExpensesPage(page) as Promise<Expense[]>,
+    PAGE_SIZE.tables
+  );
 
   const [modalVisible, setModalVisible] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -49,7 +75,9 @@ export default function AdminFinancesScreen() {
   const [description, setDescription] = useState('');
   const [amount, setAmount] = useState('');
   const [incurredOn, setIncurredOn] = useState('');
+  const [datePickerOpen, setDatePickerOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
 
   const formatPrice = (price: number) =>
     new Intl.NumberFormat('en-KE', {
@@ -58,31 +86,31 @@ export default function AdminFinancesScreen() {
       maximumFractionDigits: 0,
     }).format(price);
 
-  const fetchData = useCallback(async () => {
-    try {
-      setLoading(true);
-      const [expRes, payRes] = await Promise.all([
-        supabase.from('expenses').select('*').order('incurred_on', { ascending: false }),
-        supabase.from('payments').select('amount').eq('status', 'verified'),
-      ]);
+  const todayISO = () => new Date().toISOString().slice(0, 10);
 
-      if (expRes.error) throw expRes.error;
-      setExpenses((expRes.data as Expense[]) || []);
-      const rev = (payRes.data || []).reduce((acc, p) => acc + Number(p.amount), 0);
-      setRevenue(rev);
-    } catch (err) {
-      console.error('Fetch finances error:', err);
-      Alert.alert('Error', 'Failed to load financial records.');
+  const isValidDate = (value: string) => /^\d{4}-\d{2}-\d{2}$/.test(value);
+
+  const invalidateFinances = useCallback(async () => {
+    await queryClient.invalidateQueries({ queryKey: queryKeys.adminFinances });
+  }, [queryClient]);
+
+  const refreshAll = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      await invalidateFinances();
     } finally {
-      setLoading(false);
+      setRefreshing(false);
     }
-  }, []);
+  }, [invalidateFinances]);
 
   useEffect(() => {
-    fetchData();
-  }, [fetchData]);
+    if (revenueQuery.isError || expensesSumQuery.isError || expensesError) {
+      Alert.alert('Error', 'Failed to load financial records.');
+    }
+  }, [revenueQuery.isError, expensesSumQuery.isError, expensesError]);
 
-  const totalExpenses = expenses.reduce((acc, e) => acc + Number(e.amount), 0);
+  const revenue = Number(revenueQuery.data ?? 0);
+  const totalExpenses = Number(expensesSumQuery.data ?? 0);
   const net = revenue - totalExpenses;
 
   const resetForm = () => {
@@ -112,8 +140,8 @@ export default function AdminFinancesScreen() {
           try {
             const { error } = await supabase.from('expenses').delete().eq('id', item.id);
             if (error) throw error;
-            setExpenses((prev) => prev.filter((e) => e.id !== item.id));
             log({ action: 'delete', entityType: 'expense', entityId: item.id, description: item.description });
+            invalidateFinances();
           } catch (err) {
             console.error('Delete expense error:', err);
             Alert.alert('Error', 'Failed to delete expense.');
@@ -134,11 +162,17 @@ export default function AdminFinancesScreen() {
       return;
     }
 
+    const dateValue = incurredOn.trim() || todayISO();
+    if (!isValidDate(dateValue)) {
+      Alert.alert('Validation Error', 'Please pick a valid date (YYYY-MM-DD).');
+      return;
+    }
+
     const payload = {
       category,
       description: description.trim(),
       amount: numAmount,
-      incurred_on: incurredOn.trim() || new Date().toISOString().slice(0, 10),
+      incurred_on: dateValue,
     };
 
     try {
@@ -156,7 +190,7 @@ export default function AdminFinancesScreen() {
       }
       setModalVisible(false);
       resetForm();
-      fetchData();
+      await invalidateFinances();
     } catch (err) {
       console.error('Save expense error:', err);
       Alert.alert('Error', 'Failed to save expense.');
@@ -194,9 +228,12 @@ export default function AdminFinancesScreen() {
     </View>
   );
 
+  const initialLoading =
+    (loading || revenueQuery.isLoading || expensesSumQuery.isLoading) && expenses.length === 0;
+
   return (
     <View style={styles.container}>
-      {loading ? (
+      {initialLoading ? (
         <View style={styles.centered}>
           <ActivityIndicator size="large" color="#38BDF8" />
         </View>
@@ -229,8 +266,20 @@ export default function AdminFinancesScreen() {
               </View>
             )}
             contentContainerStyle={styles.listContainer}
-            onRefresh={fetchData}
-            refreshing={loading}
+            onRefresh={refreshAll}
+            refreshing={refreshing || listRefreshing}
+            onEndReached={loadMore}
+            onEndReachedThreshold={0.4}
+            initialNumToRender={LIST_PERF.initialNumToRender}
+            windowSize={LIST_PERF.windowSize}
+            maxToRenderPerBatch={LIST_PERF.maxToRenderPerBatch}
+            ListFooterComponent={
+              loadingMore ? (
+                <View style={{ paddingVertical: 16, alignItems: 'center' }}>
+                  <ActivityIndicator color="#38BDF8" />
+                </View>
+              ) : null
+            }
             ListEmptyComponent={
               <View style={styles.emptyCentered}>
                 <Wallet size={48} color="#94A3B8" style={{ marginBottom: 12 }} />
@@ -309,13 +358,15 @@ export default function AdminFinancesScreen() {
 
               <View style={styles.inputGroup}>
                 <Text style={styles.label}>Date Incurred</Text>
-                <TextInput
-                  style={styles.modalInput}
-                  placeholder="YYYY-MM-DD (defaults to today)"
-                  placeholderTextColor="#999"
-                  value={incurredOn}
-                  onChangeText={setIncurredOn}
-                />
+                <TouchableOpacity
+                  style={styles.dateBtn}
+                  onPress={() => setDatePickerOpen(true)}
+                >
+                  <Calendar size={16} color="#38BDF8" />
+                  <Text style={styles.dateBtnText}>
+                    {incurredOn || `${todayISO()} (today)`}
+                  </Text>
+                </TouchableOpacity>
               </View>
 
               <TouchableOpacity style={styles.submitBtn} onPress={handleSubmit} disabled={submitting}>
@@ -329,6 +380,17 @@ export default function AdminFinancesScreen() {
           </View>
         </View>
       </Modal>
+
+      <DatePickerModal
+        visible={datePickerOpen}
+        onClose={() => setDatePickerOpen(false)}
+        value={incurredOn || todayISO()}
+        onChange={(d) => {
+          setIncurredOn(d);
+          setDatePickerOpen(false);
+        }}
+        title="Date incurred"
+      />
     </View>
   );
 }
@@ -448,6 +510,18 @@ const styles = StyleSheet.create({
   chipActive: { borderColor: '#38BDF8', backgroundColor: 'rgba(56, 189, 248, 0.1)' },
   chipText: { color: '#94A3B8', fontSize: 13, textTransform: 'capitalize' },
   chipTextActive: { color: '#38BDF8', fontWeight: 'bold' },
+  dateBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: '#0F172A',
+    borderWidth: 1,
+    borderColor: '#334155',
+    borderRadius: 8,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+  },
+  dateBtnText: { color: '#F8FAFC', fontSize: 15 },
   submitBtn: {
     backgroundColor: '#38BDF8',
     borderRadius: 8,

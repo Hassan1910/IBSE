@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { ActivityIndicator, Alert, Linking, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { useUser } from '@clerk/clerk-expo';
 import { supabase } from '../../lib/supabase';
-import { leaseTotalRent } from '../../lib/leases';
+import { fetchLeaseBalance, leaseTotalRent } from '../../lib/leases';
 import { Calendar, FileText, Home, Link as LinkIcon } from 'lucide-react-native';
 
 interface LeaseAgreement {
@@ -25,6 +25,7 @@ interface LeaseAgreement {
 export default function TenantAgreementsScreen() {
   const { user } = useUser();
   const [lease, setLease] = useState<LeaseAgreement | null>(null);
+  const [chargesTotal, setChargesTotal] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -53,7 +54,20 @@ export default function TenantAgreementsScreen() {
           .maybeSingle();
 
         if (error) throw error;
-        setLease((data as any) || null);
+        const row = (data as any as LeaseAgreement) || null;
+        setLease(row);
+
+        if (row?.id) {
+          try {
+            const balance = await fetchLeaseBalance(row.id);
+            setChargesTotal(balance.charges_total);
+          } catch (balanceErr) {
+            console.error('Fetch lease balance error:', balanceErr);
+            setChargesTotal(null);
+          }
+        } else {
+          setChargesTotal(null);
+        }
       } catch (err) {
         console.error('Fetch agreement error:', err);
         Alert.alert('Error', 'Failed to load your lease agreement.');
@@ -80,6 +94,10 @@ export default function TenantAgreementsScreen() {
     new Date(dateStr).toLocaleDateString('en-KE', { year: 'numeric', month: 'short', day: 'numeric' });
 
   const daysLeft = lease ? Math.max(Math.ceil((new Date(lease.end_date).getTime() - Date.now()) / (1000 * 60 * 60 * 24)), 0) : null;
+  const leaseTotalDisplay = lease
+    ? (chargesTotal ?? leaseTotalRent(lease.rent_amount, lease.start_date, lease.end_date))
+    : 0;
+  const hasContract = !!lease?.contract_url;
 
   if (loading) {
     return (
@@ -116,9 +134,7 @@ export default function TenantAgreementsScreen() {
         </View>
         <View style={styles.row}>
           <Text style={styles.label}>Lease Total</Text>
-          <Text style={styles.value}>
-            {formatPrice(leaseTotalRent(lease.rent_amount, lease.start_date, lease.end_date))}
-          </Text>
+          <Text style={styles.value}>{formatPrice(leaseTotalDisplay)}</Text>
         </View>
         <View style={styles.row}>
           <Text style={styles.label}>Start Date</Text>
@@ -147,9 +163,15 @@ export default function TenantAgreementsScreen() {
         <Text style={styles.termsText}>{lease.terms || 'No written terms were provided in the system.'}</Text>
       </View>
 
-      <TouchableOpacity style={styles.linkBtn} onPress={openContract} disabled={!lease.contract_url}>
-        <LinkIcon size={16} color="#0F172A" style={{ marginRight: 8 }} />
-        <Text style={styles.linkBtnText}>{lease.contract_url ? 'Open Lease Document' : 'No Contract URL Available'}</Text>
+      <TouchableOpacity
+        style={[styles.linkBtn, !hasContract && styles.linkBtnDisabled]}
+        onPress={openContract}
+        disabled={!hasContract}
+      >
+        <LinkIcon size={16} color={hasContract ? '#0F172A' : '#64748B'} style={{ marginRight: 8 }} />
+        <Text style={[styles.linkBtnText, !hasContract && styles.linkBtnTextDisabled]}>
+          {hasContract ? 'Open Lease Document' : 'No Contract URL Available'}
+        </Text>
       </TouchableOpacity>
     </ScrollView>
   );
@@ -204,5 +226,9 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     paddingVertical: 14,
   },
+  linkBtnDisabled: {
+    backgroundColor: '#334155',
+  },
   linkBtnText: { color: '#0F172A', fontWeight: 'bold', fontSize: 14 },
+  linkBtnTextDisabled: { color: '#64748B' },
 });

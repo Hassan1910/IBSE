@@ -1,14 +1,26 @@
 import 'react-native-gesture-handler';
 import { useFonts } from 'expo-font';
-import { Stack, useRouter, useSegments, useRootNavigationState } from 'expo-router';
+import {
+  Syne_700Bold,
+  Syne_800ExtraBold,
+} from '@expo-google-fonts/syne';
+import {
+  DMSans_400Regular,
+  DMSans_500Medium,
+  DMSans_700Bold,
+} from '@expo-google-fonts/dm-sans';
+import { Stack, useRouter, useSegments, useRootNavigationState, usePathname } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
 import { useEffect, useRef, useState } from 'react';
 import { View, Text, ActivityIndicator, StyleSheet, TouchableOpacity } from 'react-native';
-import { ClerkProvider, useAuth } from '@clerk/clerk-expo';
+import { ClerkProvider, useAuth, useUser } from '@clerk/clerk-expo';
+import { QueryClientProvider } from '@tanstack/react-query';
 import { tokenCache } from '../lib/clerk';
 import { useRole } from '../hooks/useRole';
 import { setSupabaseToken, setSupabaseTokenGetter } from '../lib/supabase';
 import { isMaintenanceMode } from '../lib/settings';
+import { registerForPushNotifications } from '../lib/push';
+import { queryClient } from '../lib/queryClient';
 import 'react-native-reanimated';
 
 export {
@@ -19,11 +31,34 @@ export {
 SplashScreen.preventAutoHideAsync();
 
 const CLERK_PUBLISHABLE_KEY = process.env.EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY || '';
+const SUPABASE_URL = process.env.EXPO_PUBLIC_SUPABASE_URL || '';
+const SUPABASE_ANON_KEY =
+  process.env.EXPO_PUBLIC_SUPABASE_KEY || process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY || '';
+
+const missingConfig: string[] = [];
+if (!CLERK_PUBLISHABLE_KEY) missingConfig.push('EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY');
+if (!SUPABASE_URL) missingConfig.push('EXPO_PUBLIC_SUPABASE_URL');
+if (!SUPABASE_ANON_KEY) missingConfig.push('EXPO_PUBLIC_SUPABASE_ANON_KEY');
+
+function MisconfiguredScreen({ missing }: { missing: string[] }) {
+  return (
+    <View style={styles.maintenanceContainer}>
+      <Text style={styles.maintenanceTitle}>App misconfigured</Text>
+      <Text style={styles.maintenanceBody}>
+        This build is missing required environment variables, so IBSA Homes cannot start.
+        Rebuild with EAS preview/production env vars set.
+      </Text>
+      <Text style={styles.missingKeys}>{missing.join('\n')}</Text>
+    </View>
+  );
+}
 
 function InitialLayout() {
   const { isLoaded: isAuthLoaded, isSignedIn, getToken, signOut } = useAuth();
+  const { user } = useUser();
   const { role, loading: isRoleLoading } = useRole();
   const segments = useSegments();
+  const pathname = usePathname();
   const router = useRouter();
   const navigationState = useRootNavigationState();
   const [maintenanceBlocked, setMaintenanceBlocked] = useState(false);
@@ -38,7 +73,7 @@ function InitialLayout() {
     if (!isAuthLoaded) return;
 
     if (isSignedIn) {
-      setSupabaseTokenGetter(async () => {
+      const fetchClerkToken = async () => {
         try {
           return await getTokenRef.current({ template: 'supabase' });
         } catch {
@@ -49,6 +84,11 @@ function InitialLayout() {
             return null;
           }
         }
+      };
+      setSupabaseTokenGetter(fetchClerkToken);
+      // Bootstrap Realtime WebSocket auth immediately (REST uses the getter on each request).
+      void fetchClerkToken().then((token) => {
+        if (token) setSupabaseToken(token);
       });
     } else {
       setSupabaseTokenGetter(null);
@@ -58,13 +98,21 @@ function InitialLayout() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isSignedIn, isAuthLoaded]);
 
+  // Register Expo push token once signed in with a resolved role.
+  useEffect(() => {
+    if (!isAuthLoaded || !isSignedIn || isRoleLoading || !role || !user?.id) return;
+    registerForPushNotifications(user.id).catch((err) => {
+      console.warn('[push] registration skipped:', err);
+    });
+  }, [isAuthLoaded, isSignedIn, isRoleLoading, role, user?.id]);
+
   // Maintenance mode: block non-admin signed-in users.
   useEffect(() => {
     if (!isAuthLoaded || !isSignedIn || isRoleLoading || !role) {
       setMaintenanceBlocked(false);
       return;
     }
-    if (role === 'admin') {
+    if (role === 'admin' || role === 'finance') {
       setMaintenanceBlocked(false);
       return;
     }
@@ -95,10 +143,12 @@ function InitialLayout() {
 
     const performRedirect = () => {
       const inAuthGroup = segments[0] === '(auth)';
+      // Root index (`/`) is the public listings landing — guests may stay there.
+      const onPublicLanding = pathname === '/' || pathname === '';
 
       if (!isSignedIn) {
-        // If not logged in, force go to login
-        if (!inAuthGroup) {
+        // Guests may browse listings or use auth screens; everything else → login
+        if (!inAuthGroup && !onPublicLanding) {
           router.replace('/(auth)/login');
         }
       } else {
@@ -144,7 +194,7 @@ function InitialLayout() {
     // Defer redirect execution to allow the navigation tree to fully mount and register all child routes
     const timer = setTimeout(performRedirect, 0);
     return () => clearTimeout(timer);
-  }, [isSignedIn, isAuthLoaded, role, isRoleLoading, segments, navigationState, maintenanceBlocked, router]);
+  }, [isSignedIn, isAuthLoaded, role, isRoleLoading, segments, pathname, navigationState, maintenanceBlocked, router]);
 
   if (!isAuthLoaded || (isSignedIn && isRoleLoading) || checkingMaintenance) {
     return (
@@ -170,12 +220,12 @@ function InitialLayout() {
 
   return (
     <Stack screenOptions={{ headerShown: false }}>
+      <Stack.Screen name="index" />
       <Stack.Screen name="(auth)" />
       <Stack.Screen name="(admin)" />
       <Stack.Screen name="(tenant)" />
       <Stack.Screen name="(client)" />
       <Stack.Screen name="(landlord)" />
-      <Stack.Screen name="modal" options={{ presentation: 'modal' }} />
       <Stack.Screen name="+not-found" options={{ headerShown: true }} />
     </Stack>
   );
@@ -183,26 +233,38 @@ function InitialLayout() {
 
 export default function RootLayout() {
   const [loaded, error] = useFonts({
-    SpaceMono: require('../assets/fonts/SpaceMono-Regular.ttf'),
+    Syne_700Bold,
+    Syne_800ExtraBold,
+    DMSans_400Regular,
+    DMSans_500Medium,
+    DMSans_700Bold,
   });
 
   useEffect(() => {
-    if (error) throw error;
+    if (error) {
+      console.warn('[fonts] Failed to load custom fonts:', error);
+    }
   }, [error]);
 
   useEffect(() => {
-    if (loaded) {
+    if (loaded || error) {
       SplashScreen.hideAsync();
     }
-  }, [loaded]);
+  }, [loaded, error]);
 
-  if (!loaded) {
+  if (!loaded && !error) {
     return null;
+  }
+
+  if (missingConfig.length > 0) {
+    return <MisconfiguredScreen missing={missingConfig} />;
   }
 
   return (
     <ClerkProvider publishableKey={CLERK_PUBLISHABLE_KEY} tokenCache={tokenCache}>
-      <InitialLayout />
+      <QueryClientProvider client={queryClient}>
+        <InitialLayout />
+      </QueryClientProvider>
     </ClerkProvider>
   );
 }
@@ -245,5 +307,12 @@ const styles = StyleSheet.create({
     color: '#0F172A',
     fontWeight: '700',
     fontSize: 15,
+  },
+  missingKeys: {
+    color: '#F87171',
+    fontSize: 12,
+    lineHeight: 18,
+    textAlign: 'center',
+    fontFamily: 'monospace',
   },
 });

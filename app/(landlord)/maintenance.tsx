@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useRef, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -10,9 +10,10 @@ import {
   TextInput,
   Alert,
   ScrollView,
-  Image,
 } from 'react-native';
-import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
+import { Image } from 'expo-image';
+import { useLocalSearchParams, useRouter } from 'expo-router';
+import { useQueryClient } from '@tanstack/react-query';
 import { supabase } from '../../lib/supabase';
 import { useUser } from '@clerk/clerk-expo';
 import { logAudit } from '../../lib/audit';
@@ -20,6 +21,10 @@ import { notifyUser } from '../../lib/notifications';
 import MaterialsUsedModal from '../../components/MaterialsUsedModal';
 import NotificationBell from '../../components/NotificationBell';
 import { Wrench, User as UserIcon, Clock, CheckCircle, ClipboardList, DollarSign, X, Package } from 'lucide-react-native';
+import { useInfiniteList } from '../../hooks/queries/useInfiniteList';
+import { fetchLandlordMaintenancePage } from '../../hooks/queries/fetchers';
+import { queryKeys } from '../../hooks/queries/keys';
+import { PAGE_SIZE } from '../../lib/queryClient';
 
 interface MaintenanceRequest {
   id: string;
@@ -41,11 +46,9 @@ type Filter = 'active' | 'resolved' | 'all';
 export default function LandlordMaintenance() {
   const { user } = useUser();
   const router = useRouter();
+  const queryClient = useQueryClient();
   const { id: focusId } = useLocalSearchParams<{ id?: string }>();
-  const [requests, setRequests] = useState<MaintenanceRequest[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
-  const hasLoadedRef = useRef(false);
+  const userId = user?.id || '';
   const [filter, setFilter] = useState<Filter>('active');
   const [highlightedId, setHighlightedId] = useState<string | null>(null);
   const listRef = useRef<FlatList<MaintenanceRequest>>(null);
@@ -57,38 +60,27 @@ export default function LandlordMaintenance() {
   const [saving, setSaving] = useState(false);
   const [materialsRequest, setMaterialsRequest] = useState<MaintenanceRequest | null>(null);
 
-  const fetchRequests = useCallback(async (opts?: { silent?: boolean }) => {
-    if (!user?.id) return;
-    try {
-      if (opts?.silent) {
-        setRefreshing(true);
-      } else {
-        setLoading(true);
-      }
-      const { data, error } = await supabase
-        .from('maintenance_requests')
-        .select('id, tenant_id, title, description, priority, status, created_at, assigned_to, expense_amount, image_urls, properties!inner ( title, owner_id ), profiles:tenant_id ( full_name )')
-        .eq('properties.owner_id', user.id)
-        .order('created_at', { ascending: false });
-      if (error) throw error;
-      setRequests((data as any) || []);
-    } catch (err) {
-      console.error('Fetch maintenance error:', err);
-      Alert.alert('Error', 'Failed to load maintenance requests.');
-    } finally {
-      hasLoadedRef.current = true;
-      setLoading(false);
-      setRefreshing(false);
-    }
-  }, [user?.id]);
-
-  // Tab screens stay mounted, so refetch whenever this screen is focused
-  // (avoids a stale empty list after the initial mount race with auth/data).
-  useFocusEffect(
-    useCallback(() => {
-      fetchRequests({ silent: hasLoadedRef.current });
-    }, [fetchRequests]),
+  const {
+    items: requests,
+    loading,
+    refreshing,
+    loadingMore,
+    error,
+    refresh,
+    loadMore,
+  } = useInfiniteList<MaintenanceRequest>(
+    queryKeys.landlordMaintenance(userId),
+    (page) => fetchLandlordMaintenancePage(userId, page) as any,
+    PAGE_SIZE.tables,
+    { enabled: !!userId, refetchOnFocus: true }
   );
+
+  useEffect(() => {
+    if (error) {
+      console.error('Fetch maintenance error:', error);
+      Alert.alert('Error', 'Failed to load maintenance requests.');
+    }
+  }, [error]);
 
   // Focus the matching ticket when arriving from the dashboard or a notification.
   useEffect(() => {
@@ -111,12 +103,18 @@ export default function LandlordMaintenance() {
     }
   }, [focusId, loading, requests, router]);
 
+  const invalidateMaintenance = () =>
+    Promise.all([
+      queryClient.invalidateQueries({ queryKey: ['landlord', 'maintenance', userId] }),
+      queryClient.invalidateQueries({ queryKey: queryKeys.landlordDashboard(userId) }),
+    ]);
+
   const updateStatus = async (item: MaintenanceRequest, nextStatus: 'in_progress' | 'resolved') => {
     try {
       const patch: Record<string, unknown> = { status: nextStatus };
       if (nextStatus === 'resolved') patch.resolved_at = new Date().toISOString();
-      const { error } = await supabase.from('maintenance_requests').update(patch).eq('id', item.id);
-      if (error) throw error;
+      const { error: updateError } = await supabase.from('maintenance_requests').update(patch).eq('id', item.id);
+      if (updateError) throw updateError;
       logAudit({ actorId: user?.id || '', action: 'update', entityType: 'maintenance', entityId: item.id, description: `Maintenance ${nextStatus}` });
       await notifyUser({
         userId: item.tenant_id,
@@ -126,7 +124,7 @@ export default function LandlordMaintenance() {
         entityType: 'maintenance',
         entityId: item.id,
       });
-      fetchRequests();
+      await invalidateMaintenance();
     } catch (err) {
       console.error('Update maintenance error:', err);
       Alert.alert('Error', 'Failed to update request status.');
@@ -149,16 +147,16 @@ export default function LandlordMaintenance() {
     }
     try {
       setSaving(true);
-      const { error } = await supabase
+      const { error: assignError } = await supabase
         .from('maintenance_requests')
         .update({ assigned_to: assignedTo.trim() || null, expense_amount: expenseVal })
         .eq('id', activeRequest.id);
-      if (error) throw error;
+      if (assignError) throw assignError;
       logAudit({ actorId: user?.id || '', action: 'update', entityType: 'maintenance', entityId: activeRequest.id, description: 'Assigned maintenance task' });
       Alert.alert('Success', 'Task assignment saved.');
       setAssignVisible(false);
       setActiveRequest(null);
-      fetchRequests();
+      await invalidateMaintenance();
     } catch (err) {
       console.error('Assign maintenance error:', err);
       Alert.alert('Error', 'Failed to save assignment.');
@@ -208,7 +206,7 @@ export default function LandlordMaintenance() {
 
   return (
     <View style={styles.container}>
-      {loading ? (
+      {loading && requests.length === 0 ? (
         <View style={styles.centered}>
           <ActivityIndicator size="large" color="#38BDF8" />
         </View>
@@ -241,7 +239,7 @@ export default function LandlordMaintenance() {
                 {item.image_urls?.length ? (
                   <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.imageRow}>
                     {item.image_urls.map((uri) => (
-                      <Image key={uri} source={{ uri }} style={styles.issueImage} />
+                      <Image key={uri} source={{ uri }} style={styles.issueImage} contentFit="cover" cachePolicy="memory-disk" />
                     ))}
                   </ScrollView>
                 ) : null}
@@ -305,8 +303,17 @@ export default function LandlordMaintenance() {
             );
           }}
           contentContainerStyle={styles.listContainer}
-          onRefresh={() => fetchRequests({ silent: true })}
+          onRefresh={refresh}
           refreshing={refreshing}
+          onEndReached={loadMore}
+          onEndReachedThreshold={0.4}
+          ListFooterComponent={
+            loadingMore ? (
+              <View style={styles.footerLoader}>
+                <ActivityIndicator color="#38BDF8" />
+              </View>
+            ) : null
+          }
           ListEmptyComponent={
             <View style={styles.emptyCentered}>
               <Wrench size={48} color="#94A3B8" style={styles.emptyIcon} />
@@ -453,6 +460,7 @@ const styles = StyleSheet.create({
   },
   assignRowText: { color: '#94A3B8', fontSize: 12, fontWeight: '500' },
   centered: { flex: 1, justifyContent: 'center', alignItems: 'center' },
+  footerLoader: { paddingVertical: 16, alignItems: 'center' },
   emptyCentered: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 24, marginTop: 60 },
   emptyIcon: { marginBottom: 12 },
   emptyText: { color: '#94A3B8', fontSize: 14, textAlign: 'center' },

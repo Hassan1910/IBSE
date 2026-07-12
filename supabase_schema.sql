@@ -49,9 +49,9 @@ CREATE POLICY "Users can create their own profile during signup" ON public.profi
 CREATE POLICY "Users can update their own profile" ON public.profiles
   FOR UPDATE USING ((SELECT (auth.jwt()->>'sub')) = id) WITH CHECK ((SELECT (auth.jwt()->>'sub')) = id);
 
-CREATE POLICY "Admins can view all profiles" ON public.profiles
+CREATE POLICY "Admins and Finance can view all profiles" ON public.profiles
   FOR SELECT TO authenticated
-  USING ((SELECT private.is_admin()));
+  USING ((SELECT private.is_admin_or_finance()));
 
 CREATE POLICY "Admins can update all profiles" ON public.profiles
   FOR UPDATE TO authenticated
@@ -122,6 +122,17 @@ CREATE POLICY "Admins can update bookings" ON public.bookings
       SELECT 1 FROM public.profiles
       WHERE profiles.id = (auth.jwt()->>'sub') AND profiles.role = 'admin'
     )
+  );
+
+CREATE POLICY "Clients can cancel own pending bookings" ON public.bookings
+  FOR UPDATE TO authenticated
+  USING (
+    client_id = (auth.jwt()->>'sub')
+    AND status = 'pending'
+  )
+  WITH CHECK (
+    client_id = (auth.jwt()->>'sub')
+    AND status = 'cancelled'
   );
 
 
@@ -300,9 +311,103 @@ CREATE POLICY "Admins can view all feedback" ON public.feedback
 -- =======================================================
 INSERT INTO public.properties (title, description, type, category, price, location, status, image_urls)
 VALUES
-('Modern 3-Bedroom Apartment', 'Spacious apartment near Marsabit Town center, master en-suite, modern finishes.', 'rental', 'residential', 25000.00, 'Marsabit Town', 'available', ARRAY['https://images.unsplash.com/photo-1545324418-cc1a3fa10c00']),
-('Commercial Retail Space', 'Prime business location on Gari Road, high foot traffic, 1200 sq ft.', 'rental', 'commercial', 45000.00, 'Marsabit Gari Rd', 'available', ARRAY['https://images.unsplash.com/photo-1486406146926-c627a92ad1ab']),
-('1/4 Acre Development Land', 'Prime plot with ready title deed, water and electricity nearby.', 'sale', 'land', 1200000.00, 'Marsabit Outskirts', 'available', ARRAY['https://images.unsplash.com/photo-1500382017468-9049fed747ef']);
+(
+  'Sunny 2-Bedroom Flat near Market',
+  'Bright second-floor flat with balcony, fitted kitchen, and reliable water. Walking distance to Marsabit market.',
+  'rental', 'residential', 18000.00, 'Marsabit Market Area', 'available',
+  ARRAY[
+    'https://images.unsplash.com/photo-1522708323590-d24dbb6b0267?w=1200&q=80',
+    'https://images.unsplash.com/photo-1560448204-e02f11c3d0e2?w=1200&q=80',
+    'https://images.unsplash.com/photo-1502672260266-1c1ef2d93688?w=1200&q=80'
+  ]
+),
+(
+  'Family Bungalow with Garden',
+  '3-bedroom bungalow on a quiet street, private compound, borehole access, and shaded outdoor seating.',
+  'rental', 'residential', 35000.00, 'Marsabit Stadium Road', 'available',
+  ARRAY[
+    'https://images.unsplash.com/photo-1564013799919-ab600027ffc6?w=1200&q=80',
+    'https://images.unsplash.com/photo-1600596542815-ffad4c1539a9?w=1200&q=80',
+    'https://images.unsplash.com/photo-1600585154340-be6161a56a0c?w=1200&q=80'
+  ]
+),
+(
+  'Executive Studio Apartment',
+  'Fully furnished studio ideal for professionals. Secure parking, Wi-Fi ready, and modern finishes throughout.',
+  'rental', 'residential', 15000.00, 'Marsabit Town Center', 'available',
+  ARRAY[
+    'https://images.unsplash.com/photo-1536376072261-38c75010e6c9?w=1200&q=80',
+    'https://images.unsplash.com/photo-1493809842364-78817add7ffb?w=1200&q=80'
+  ]
+),
+(
+  'Spacious 4-Bedroom Maisonette',
+  'Two-level maisonette with master en-suite, servants quarter, and ample parking for three vehicles.',
+  'rental', 'residential', 55000.00, 'Marsabit Hospital Road', 'available',
+  ARRAY[
+    'https://images.unsplash.com/photo-1600047509807-ba8f99d2cdde?w=1200&q=80',
+    'https://images.unsplash.com/photo-1600607687939-ce8a6c25118c?w=1200&q=80',
+    'https://images.unsplash.com/photo-1600566753190-17f0baa2a6c3?w=1200&q=80'
+  ]
+),
+(
+  'Affordable Bedsitter Block Unit',
+  'Clean bedsitter in a managed block. Shared compound security, prepaid electricity, and nearby shops.',
+  'rental', 'residential', 8000.00, 'Marsabit Manyatta', 'available',
+  ARRAY[
+    'https://images.unsplash.com/photo-1554995207-c18c203602cb?w=1200&q=80',
+    'https://images.unsplash.com/photo-1484154218962-a197022b5858?w=1200&q=80'
+  ]
+),
+(
+  'Hillview 3-Bedroom Apartment',
+  'Corner unit with panoramic views, open-plan lounge, two bathrooms, and assigned parking bay.',
+  'rental', 'residential', 28000.00, 'Marsabit Hill Area', 'available',
+  ARRAY[
+    'https://images.unsplash.com/photo-1512917774080-9991f1c4c750?w=1200&q=80',
+    'https://images.unsplash.com/photo-1613490493576-7fde63acd811?w=1200&q=80',
+    'https://images.unsplash.com/photo-1570129477492-45c003edd2be?w=1200&q=80'
+  ]
+),
+(
+  'Corner Shop on Main Street',
+  'Ground-floor retail unit with street frontage, roll-up shutter, and storage room at the rear.',
+  'rental', 'commercial', 40000.00, 'Marsabit Main Street', 'available',
+  ARRAY[
+    'https://images.unsplash.com/photo-1441986300917-64674bd600d8?w=1200&q=80',
+    'https://images.unsplash.com/photo-1604719312566-8912e9227c6a?w=1200&q=80',
+    'https://images.unsplash.com/photo-1556740738-b6a63e27c4df?w=1200&q=80'
+  ]
+),
+(
+  'Office Suite above Bank Plaza',
+  'Open-plan office floor (approx. 900 sq ft) with partitioned meeting room, toilets, and lift access.',
+  'rental', 'commercial', 60000.00, 'Marsabit Bank Plaza', 'available',
+  ARRAY[
+    'https://images.unsplash.com/photo-1497366216548-37526070297c?w=1200&q=80',
+    'https://images.unsplash.com/photo-1497366811353-6870744d04b2?w=1200&q=80',
+    'https://images.unsplash.com/photo-1524758631624-e2822e304c36?w=1200&q=80'
+  ]
+),
+(
+  'Half-Acre Plot near Airport Road',
+  'Cleared half-acre with road access, survey beaconed, and title ready for transfer. Ideal for residential development.',
+  'sale', 'land', 2500000.00, 'Marsabit Airport Road', 'available',
+  ARRAY[
+    'https://images.unsplash.com/photo-1500382017468-9049fed747ef?w=1200&q=80',
+    'https://images.unsplash.com/photo-1464226184884-fa280b87c399?w=1200&q=80',
+    'https://images.unsplash.com/photo-1628624747186-a941c476b7ef?w=1200&q=80'
+  ]
+),
+(
+  'Quarter-Acre Residential Plot',
+  'Serviced quarter-acre plot in a growing neighbourhood. Water and electricity within 200 m.',
+  'sale', 'land', 950000.00, 'Marsabit Dakabaricha', 'available',
+  ARRAY[
+    'https://images.unsplash.com/photo-1500382017468-9049fed747ef?w=1200&q=80',
+    'https://images.unsplash.com/photo-1472214103451-9374bd1c798e?w=1200&q=80'
+  ]
+);
 
 
 -- =======================================================
@@ -1767,3 +1872,118 @@ $$;
 
 REVOKE ALL ON FUNCTION public.notify_for_property(UUID, TEXT, TEXT, TEXT, TEXT, TEXT) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.notify_for_property(UUID, TEXT, TEXT, TEXT, TEXT, TEXT) TO authenticated;
+
+CREATE OR REPLACE FUNCTION public.notify_admins(
+  p_type TEXT,
+  p_title TEXT,
+  p_body TEXT,
+  p_entity_type TEXT DEFAULT NULL,
+  p_entity_id TEXT DEFAULT NULL
+)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_caller TEXT := auth.jwt()->>'sub';
+  v_role TEXT;
+BEGIN
+  IF v_caller IS NULL THEN
+    RAISE EXCEPTION 'Not authenticated' USING ERRCODE = '42501';
+  END IF;
+
+  SELECT role INTO v_role FROM public.profiles WHERE id = v_caller;
+
+  IF v_role IS NULL OR v_role NOT IN ('admin', 'finance', 'landlord', 'tenant', 'client') THEN
+    RAISE EXCEPTION 'Not allowed' USING ERRCODE = '42501';
+  END IF;
+
+  INSERT INTO public.notifications (user_id, type, title, body, entity_type, entity_id)
+  SELECT id, p_type, p_title, p_body, p_entity_type, p_entity_id
+  FROM public.profiles
+  WHERE role = 'admin';
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.notify_admins(TEXT, TEXT, TEXT, TEXT, TEXT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.notify_admins(TEXT, TEXT, TEXT, TEXT, TEXT) TO authenticated;
+
+-- =======================================================
+-- Appended from 20260723000000_system_completeness.sql
+-- (full incremental history lives under supabase/migrations/)
+-- =======================================================
+
+UPDATE public.bookings SET type = 'viewing' WHERE type = 'reservation';
+ALTER TABLE public.bookings DROP CONSTRAINT IF EXISTS bookings_type_check;
+ALTER TABLE public.bookings ADD CONSTRAINT bookings_type_check CHECK (type IN ('viewing'));
+ALTER TABLE public.payments DROP COLUMN IF EXISTS booking_id;
+
+DROP POLICY IF EXISTS "Authenticated users can read invites" ON public.user_invites;
+DROP POLICY IF EXISTS "Users can accept their own invite" ON public.user_invites;
+DROP POLICY IF EXISTS "Staff and invitees can read invites" ON public.user_invites;
+CREATE POLICY "Staff and invitees can read invites" ON public.user_invites
+  FOR SELECT TO authenticated
+  USING (
+    (SELECT private.is_admin())
+    OR invited_by = (auth.jwt()->>'sub')
+    OR lower(email) = lower(COALESCE(auth.jwt()->>'email', ''))
+  );
+DROP POLICY IF EXISTS "Users can accept own email invite" ON public.user_invites;
+CREATE POLICY "Users can accept own email invite" ON public.user_invites
+  FOR UPDATE TO authenticated
+  USING (lower(email) = lower(COALESCE(auth.jwt()->>'email', '')) AND status = 'pending')
+  WITH CHECK (lower(email) = lower(COALESCE(auth.jwt()->>'email', '')) AND status = 'accepted');
+
+DROP FUNCTION IF EXISTS public.get_jwt_sub();
+
+CREATE TABLE IF NOT EXISTS public.device_push_tokens (
+  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+  token TEXT NOT NULL,
+  platform TEXT,
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL,
+  UNIQUE (user_id, token)
+);
+ALTER TABLE public.device_push_tokens ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "Users manage own push tokens" ON public.device_push_tokens;
+CREATE POLICY "Users manage own push tokens" ON public.device_push_tokens
+  FOR ALL TO authenticated
+  USING (user_id = (auth.jwt()->>'sub'))
+  WITH CHECK (user_id = (auth.jwt()->>'sub'));
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.device_push_tokens TO authenticated;
+
+-- See also: supabase/migrations/20260725000000_charges_docs_messaging.sql
+-- (payment proof/receipt columns, charges, lease_documents, messaging, landlord_report_summary)
+
+-- =======================================================
+-- Landlord account requests
+-- (supabase/migrations/20260730000000_landlord_account_requests.sql)
+-- =======================================================
+CREATE TABLE IF NOT EXISTS public.landlord_account_requests (
+  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  full_name TEXT NOT NULL,
+  email TEXT NOT NULL,
+  phone TEXT NOT NULL,
+  note TEXT,
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'fulfilled', 'dismissed')),
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL,
+  resolved_at TIMESTAMP WITH TIME ZONE,
+  resolved_by TEXT REFERENCES public.profiles(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS landlord_account_requests_status_idx
+  ON public.landlord_account_requests (status, created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS landlord_account_requests_pending_email_uidx
+  ON public.landlord_account_requests (lower(email))
+  WHERE status = 'pending';
+ALTER TABLE public.landlord_account_requests ENABLE ROW LEVEL SECURITY;
+GRANT SELECT, UPDATE ON public.landlord_account_requests TO authenticated;
+DROP POLICY IF EXISTS "Admins can read landlord account requests" ON public.landlord_account_requests;
+CREATE POLICY "Admins can read landlord account requests" ON public.landlord_account_requests
+  FOR SELECT TO authenticated USING ((SELECT private.is_admin()));
+DROP POLICY IF EXISTS "Admins can update landlord account requests" ON public.landlord_account_requests;
+CREATE POLICY "Admins can update landlord account requests" ON public.landlord_account_requests
+  FOR UPDATE TO authenticated
+  USING ((SELECT private.is_admin()))
+  WITH CHECK ((SELECT private.is_admin()));

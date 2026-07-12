@@ -13,9 +13,14 @@ import {
 import { supabase } from '../../lib/supabase';
 import { useUser } from '@clerk/clerk-expo';
 import { useLocalSearchParams, useRouter } from 'expo-router';
+import { useQueryClient } from '@tanstack/react-query';
 import { useAudit } from '../../hooks/useAudit';
 import { notifyUser } from '../../lib/notifications';
 import { X, MessageSquare, Reply, CheckCircle, Trash2, Inbox } from 'lucide-react-native';
+import { useInfiniteList } from '../../hooks/queries/useInfiniteList';
+import { fetchSupportPage } from '../../hooks/queries/fetchers';
+import { queryKeys } from '../../hooks/queries/keys';
+import { LIST_PERF, PAGE_SIZE } from '../../lib/queryClient';
 
 interface Feedback {
   id: string;
@@ -35,54 +40,87 @@ export default function AdminSupportScreen() {
   const { user } = useUser();
   const { log } = useAudit();
   const router = useRouter();
+  const queryClient = useQueryClient();
   const { id: focusId } = useLocalSearchParams<{ id?: string }>();
 
-  const [feedback, setFeedback] = useState<Feedback[]>([]);
-  const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<Filter>('open');
+
+  const {
+    items: feedback,
+    loading,
+    refreshing,
+    loadingMore,
+    error,
+    refresh,
+    loadMore,
+  } = useInfiniteList<Feedback>(
+    [...queryKeys.adminSupport, filter],
+    (page) => fetchSupportPage(page, filter) as unknown as Promise<Feedback[]>,
+    PAGE_SIZE.tables
+  );
 
   const [modalVisible, setModalVisible] = useState(false);
   const [selected, setSelected] = useState<Feedback | null>(null);
   const [reply, setReply] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
-  const fetchFeedback = useCallback(async () => {
-    try {
-      setLoading(true);
-      const { data, error } = await supabase
-        .from('feedback')
-        .select(`id, user_id, type, message, status, admin_reply, replied_at, created_at, profiles!feedback_user_id_fkey ( full_name, email )`)
-        .order('created_at', { ascending: false });
-      if (error) throw error;
-      setFeedback((data as any) || []);
-    } catch (err) {
-      console.error('Fetch feedback error:', err);
-      Alert.alert('Error', 'Failed to load feedback.');
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  const invalidateSupport = () =>
+    queryClient.invalidateQueries({ queryKey: queryKeys.adminSupport });
 
-  useEffect(() => {
-    fetchFeedback();
-  }, [fetchFeedback]);
-
-  useEffect(() => {
-    if (!focusId || loading) return;
-    const match = feedback.find((f) => f.id === focusId);
-    if (!match) return;
-    setFilter(match.status === 'resolved' ? 'resolved' : 'open');
-    openReply(match);
-    router.setParams({ id: undefined });
-  }, [focusId, loading, feedback, router]);
-
-  const visible = feedback.filter((f) => (filter === 'all' ? true : f.status === filter));
-
-  const openReply = (item: Feedback) => {
+  const openReply = useCallback((item: Feedback) => {
     setSelected(item);
     setReply(item.admin_reply || '');
     setModalVisible(true);
-  };
+  }, []);
+
+  useEffect(() => {
+    if (error) {
+      console.error('Fetch feedback error:', error);
+      Alert.alert('Error', 'Failed to load feedback.');
+    }
+  }, [error]);
+
+  useEffect(() => {
+    if (!focusId || loading) return;
+
+    const match = feedback.find((f) => f.id === focusId);
+    if (match) {
+      openReply(match);
+      router.setParams({ id: undefined });
+      return;
+    }
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data, error: fetchError } = await supabase
+          .from('feedback')
+          .select(
+            'id, user_id, type, message, status, admin_reply, replied_at, created_at, profiles!feedback_user_id_fkey ( full_name, email )'
+          )
+          .eq('id', focusId)
+          .maybeSingle();
+        if (cancelled) return;
+        if (fetchError) throw fetchError;
+        if (!data) {
+          router.setParams({ id: undefined });
+          return;
+        }
+        const row = data as unknown as Feedback;
+        setFilter(row.status === 'resolved' ? 'resolved' : 'open');
+        openReply(row);
+        router.setParams({ id: undefined });
+      } catch (err) {
+        if (cancelled) return;
+        console.error('Focus feedback error:', err);
+        router.setParams({ id: undefined });
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [focusId, loading, feedback, router, openReply]);
 
   const submitReply = async (markResolved: boolean) => {
     if (!selected) return;
@@ -92,7 +130,7 @@ export default function AdminSupportScreen() {
     }
     try {
       setSubmitting(true);
-      const { error } = await supabase
+      const { error: replyError } = await supabase
         .from('feedback')
         .update({
           admin_reply: reply.trim(),
@@ -101,7 +139,7 @@ export default function AdminSupportScreen() {
           status: markResolved ? 'resolved' : 'open',
         })
         .eq('id', selected.id);
-      if (error) throw error;
+      if (replyError) throw replyError;
       log({
         action: 'reply',
         entityType: 'feedback',
@@ -118,7 +156,7 @@ export default function AdminSupportScreen() {
       });
       setModalVisible(false);
       setReply('');
-      fetchFeedback();
+      await invalidateSupport();
     } catch (err) {
       console.error('Reply feedback error:', err);
       Alert.alert('Error', 'Failed to send response.');
@@ -130,10 +168,13 @@ export default function AdminSupportScreen() {
   const toggleResolved = async (item: Feedback) => {
     const nextStatus = item.status === 'resolved' ? 'open' : 'resolved';
     try {
-      const { error } = await supabase.from('feedback').update({ status: nextStatus }).eq('id', item.id);
-      if (error) throw error;
-      setFeedback((prev) => prev.map((f) => (f.id === item.id ? { ...f, status: nextStatus } : f)));
+      const { error: statusError } = await supabase
+        .from('feedback')
+        .update({ status: nextStatus })
+        .eq('id', item.id);
+      if (statusError) throw statusError;
       log({ action: 'update', entityType: 'feedback', entityId: item.id, description: `Marked ${nextStatus}` });
+      await invalidateSupport();
     } catch (err) {
       console.error('Toggle resolved error:', err);
       Alert.alert('Error', 'Failed to update status.');
@@ -148,10 +189,10 @@ export default function AdminSupportScreen() {
         style: 'destructive',
         onPress: async () => {
           try {
-            const { error } = await supabase.from('feedback').delete().eq('id', item.id);
-            if (error) throw error;
-            setFeedback((prev) => prev.filter((f) => f.id !== item.id));
+            const { error: delError } = await supabase.from('feedback').delete().eq('id', item.id);
+            if (delError) throw delError;
             log({ action: 'delete', entityType: 'feedback', entityId: item.id });
+            await invalidateSupport();
           } catch (err) {
             console.error('Delete feedback error:', err);
             Alert.alert('Error', 'Failed to delete feedback.');
@@ -193,14 +234,15 @@ export default function AdminSupportScreen() {
 
   return (
     <View style={styles.container}>
-      {loading ? (
+      {loading && feedback.length === 0 ? (
         <View style={styles.centered}>
           <ActivityIndicator size="large" color="#38BDF8" />
         </View>
       ) : (
         <FlatList
-          data={visible}
+          data={feedback}
           keyExtractor={(item) => item.id}
+          {...LIST_PERF}
           ListHeaderComponent={renderHeader}
           renderItem={({ item }) => {
             const colors = typeColors(item.type);
@@ -264,8 +306,17 @@ export default function AdminSupportScreen() {
             );
           }}
           contentContainerStyle={styles.listContainer}
-          onRefresh={fetchFeedback}
-          refreshing={loading}
+          onRefresh={refresh}
+          refreshing={refreshing}
+          onEndReached={loadMore}
+          onEndReachedThreshold={0.4}
+          ListFooterComponent={
+            loadingMore ? (
+              <View style={styles.loadingMore}>
+                <ActivityIndicator color="#38BDF8" />
+              </View>
+            ) : null
+          }
           ListEmptyComponent={
             <View style={styles.emptyCentered}>
               <Inbox size={48} color="#94A3B8" style={{ marginBottom: 12 }} />
@@ -330,6 +381,7 @@ export default function AdminSupportScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#0F172A' },
   listContainer: { padding: 16 },
+  loadingMore: { paddingVertical: 16, alignItems: 'center' },
   filterRow: {
     flexDirection: 'row',
     backgroundColor: '#1E293B',

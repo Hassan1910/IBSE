@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, FlatList, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useUser } from '@clerk/clerk-expo';
@@ -30,6 +30,7 @@ export default function TenantFeedbackScreen() {
   const { log } = useAudit();
   const router = useRouter();
   const { id: focusId } = useLocalSearchParams<{ id?: string }>();
+  const listRef = useRef<FlatList<FeedbackItem>>(null);
   const [mode, setMode] = useState<ViewMode>('submit');
   const [feedbackType, setFeedbackType] = useState<FeedbackType>('inquiry');
   const [message, setMessage] = useState('');
@@ -70,6 +71,15 @@ export default function TenantFeedbackScreen() {
       fetchHistory();
     }
   }, [mode, fetchHistory]);
+
+  useEffect(() => {
+    if (!highlightedId || loadingHistory || history.length === 0) return;
+    const index = history.findIndex((item) => item.id === highlightedId);
+    if (index < 0) return;
+    requestAnimationFrame(() => {
+      listRef.current?.scrollToIndex({ index, animated: true, viewPosition: 0.1 });
+    });
+  }, [highlightedId, history, loadingHistory]);
 
   const handleSubmit = async () => {
     if (!user?.id) return;
@@ -152,11 +162,17 @@ export default function TenantFeedbackScreen() {
         </View>
       ) : (
         <FlatList
+          ref={listRef}
           data={history}
           keyExtractor={(item) => item.id}
           contentContainerStyle={{ padding: 16, flexGrow: 1 }}
           onRefresh={fetchHistory}
           refreshing={loadingHistory}
+          onScrollToIndexFailed={(info) => {
+            setTimeout(() => {
+              listRef.current?.scrollToIndex({ index: info.index, animated: true, viewPosition: 0.1 });
+            }, 100);
+          }}
           renderItem={({ item }) => (
             <View style={[styles.historyCard, highlightedId === item.id && styles.highlightedCard]}>
               <View style={styles.historyHeader}>

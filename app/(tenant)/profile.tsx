@@ -2,7 +2,6 @@ import React, { useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
-  Image,
   Modal,
   ScrollView,
   StyleSheet,
@@ -11,6 +10,7 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
+import { Image } from 'expo-image';
 import { useAuth, useUser } from '@clerk/clerk-expo';
 import { supabase } from '../../lib/supabase';
 import { useAudit } from '../../hooks/useAudit';
@@ -99,6 +99,16 @@ export default function TenantProfile() {
 
       const { error } = await supabase.from('profiles').update(patch).eq('id', user.id);
       if (error) throw error;
+
+      // Keep Clerk display name in sync with the app profile.
+      const nameParts = fullName.trim().split(/\s+/);
+      const firstName = nameParts[0] || '';
+      const lastName = nameParts.slice(1).join(' ') || undefined;
+      try {
+        await user.update({ firstName, lastName });
+      } catch (clerkErr) {
+        console.error('Sync Clerk name error:', clerkErr);
+      }
 
       await log({
         action: 'update',
@@ -197,7 +207,12 @@ export default function TenantProfile() {
       <View style={styles.profileCard}>
         <TouchableOpacity style={styles.avatar} onPress={handleChangeAvatar} disabled={uploadingAvatar}>
           {profile?.avatar_url ? (
-            <Image source={{ uri: profile.avatar_url }} style={styles.avatarImage} />
+            <Image
+              source={{ uri: profile.avatar_url }}
+              style={styles.avatarImage}
+              contentFit="cover"
+              cachePolicy="memory-disk"
+            />
           ) : (
             <User size={40} color="#0F172A" />
           )}

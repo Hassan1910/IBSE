@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View,
   Text,
@@ -10,15 +10,20 @@ import {
   TextInput,
   Alert,
   ScrollView,
-  Image,
 } from 'react-native';
-import { useFocusEffect, useRouter } from 'expo-router';
+import { Image } from 'expo-image';
+import { useRouter } from 'expo-router';
 import { useUser } from '@clerk/clerk-expo';
+import { useQueryClient } from '@tanstack/react-query';
 import { supabase } from '../../lib/supabase';
 import { logAudit } from '../../lib/audit';
 import { pickImages, uploadImage, type PickedImage } from '../../lib/storage';
 import { Plus, X, MapPin, Tag, Landmark, Edit2, Trash2, DoorOpen, Camera } from 'lucide-react-native';
 import NotificationBell from '../../components/NotificationBell';
+import { useInfiniteList } from '../../hooks/queries/useInfiniteList';
+import { fetchLandlordPropertiesPage } from '../../hooks/queries/fetchers';
+import { queryKeys } from '../../hooks/queries/keys';
+import { LIST_PERF, PAGE_SIZE } from '../../lib/queryClient';
 
 interface Property {
   id: string;
@@ -35,8 +40,23 @@ interface Property {
 export default function LandlordProperties() {
   const router = useRouter();
   const { user } = useUser();
-  const [properties, setProperties] = useState<Property[]>([]);
-  const [loading, setLoading] = useState(true);
+  const queryClient = useQueryClient();
+  const userId = user?.id || '';
+
+  const {
+    items: properties,
+    loading,
+    refreshing,
+    loadingMore,
+    error,
+    refresh,
+    loadMore,
+  } = useInfiniteList<Property>(
+    queryKeys.landlordProperties(userId),
+    (page) => fetchLandlordPropertiesPage(userId, page),
+    PAGE_SIZE.properties,
+    { enabled: !!userId, refetchOnFocus: true }
+  );
 
   const [modalVisible, setModalVisible] = useState(false);
   const [title, setTitle] = useState('');
@@ -48,6 +68,19 @@ export default function LandlordProperties() {
   const [selectedImages, setSelectedImages] = useState<PickedImage[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (error) {
+      console.error('Fetch properties error:', error);
+      Alert.alert('Error', 'Failed to load your properties.');
+    }
+  }, [error]);
+
+  const invalidateProperties = () =>
+    Promise.all([
+      queryClient.invalidateQueries({ queryKey: ['landlord', 'properties', userId] }),
+      queryClient.invalidateQueries({ queryKey: queryKeys.landlordDashboard(userId) }),
+    ]);
 
   const resetForm = () => {
     setEditingId(null);
@@ -80,11 +113,11 @@ export default function LandlordProperties() {
         style: 'destructive',
         onPress: async () => {
           try {
-            const { error } = await supabase.from('properties').delete().eq('id', id);
-            if (error) throw error;
+            const { error: delError } = await supabase.from('properties').delete().eq('id', id);
+            if (delError) throw delError;
             logAudit({ actorId: user?.id || '', action: 'delete', entityType: 'property', entityId: id, description: 'Deleted property' });
             Alert.alert('Success', 'Property deleted.');
-            setProperties((prev) => prev.filter((p) => p.id !== id));
+            await invalidateProperties();
           } catch (err) {
             console.error('Delete property error:', err);
             Alert.alert('Error', 'Failed to delete property.');
@@ -108,36 +141,6 @@ export default function LandlordProperties() {
   const handleRemoveImage = (index: number) => {
     setSelectedImages((prev) => prev.filter((_, i) => i !== index));
   };
-
-  const fetchProperties = useCallback(async () => {
-    if (!user?.id) return;
-    try {
-      setLoading(true);
-      const { data, error } = await supabase
-        .from('properties')
-        .select('*')
-        .eq('owner_id', user.id)
-        .order('created_at', { ascending: false });
-
-      if (error) throw error;
-      setProperties(data || []);
-    } catch (err: any) {
-      console.error('Fetch properties error:', err);
-      Alert.alert('Error', 'Failed to load your properties.');
-    } finally {
-      setLoading(false);
-    }
-  }, [user?.id]);
-
-  useEffect(() => {
-    fetchProperties();
-  }, [fetchProperties]);
-
-  useFocusEffect(
-    useCallback(() => {
-      fetchProperties();
-    }, [fetchProperties])
-  );
 
   const handleSubmit = async () => {
     if (!title.trim() || !description.trim() || !price || !location.trim()) {
@@ -173,7 +176,7 @@ export default function LandlordProperties() {
       }
 
       if (editingId) {
-        const { error } = await supabase
+        const { error: updateError } = await supabase
           .from('properties')
           .update({
             title: title.trim(),
@@ -186,11 +189,11 @@ export default function LandlordProperties() {
           })
           .eq('id', editingId);
 
-        if (error) throw error;
+        if (updateError) throw updateError;
         logAudit({ actorId: user.id, action: 'update', entityType: 'property', entityId: editingId, description: `Updated ${title.trim()}` });
         Alert.alert('Success', 'Property updated successfully.');
       } else {
-        const { error } = await supabase.from('properties').insert({
+        const { error: insertError } = await supabase.from('properties').insert({
           title: title.trim(),
           description: description.trim(),
           type,
@@ -202,14 +205,14 @@ export default function LandlordProperties() {
           owner_id: user.id,
         });
 
-        if (error) throw error;
+        if (insertError) throw insertError;
         logAudit({ actorId: user.id, action: 'create', entityType: 'property', description: `Listed ${title.trim()}` });
         Alert.alert('Success', 'New property listed successfully.');
       }
 
       setModalVisible(false);
       resetForm();
-      fetchProperties();
+      await invalidateProperties();
     } catch (err: any) {
       console.error('Property save error:', err);
       Alert.alert('Error', 'Failed to save property details.');
@@ -233,7 +236,7 @@ export default function LandlordProperties() {
         <Text style={styles.topBarTitle}>My Properties</Text>
         <NotificationBell href="/(landlord)/notifications" />
       </View>
-      {loading ? (
+      {loading && properties.length === 0 ? (
         <View style={styles.centered}>
           <ActivityIndicator size="large" color="#38BDF8" />
         </View>
@@ -242,10 +245,11 @@ export default function LandlordProperties() {
           <FlatList
             data={properties}
             keyExtractor={(item) => item.id}
+            {...LIST_PERF}
             renderItem={({ item }) => (
               <View style={styles.card}>
                 {item.image_urls?.[0] ? (
-                  <Image source={{ uri: item.image_urls[0] }} style={styles.cardImage} />
+                  <Image source={{ uri: item.image_urls[0] }} style={styles.cardImage} contentFit="cover" cachePolicy="memory-disk" />
                 ) : null}
                 <View style={styles.cardHeader}>
                   <Text style={styles.cardTitle}>{item.title}</Text>
@@ -300,8 +304,17 @@ export default function LandlordProperties() {
               </View>
             )}
             contentContainerStyle={styles.listContainer}
-            onRefresh={fetchProperties}
-            refreshing={loading}
+            onRefresh={refresh}
+            refreshing={refreshing}
+            onEndReached={loadMore}
+            onEndReachedThreshold={0.4}
+            ListFooterComponent={
+              loadingMore ? (
+                <View style={styles.footerLoader}>
+                  <ActivityIndicator color="#38BDF8" />
+                </View>
+              ) : null
+            }
             ListEmptyComponent={
               <View style={styles.emptyCentered}>
                 <Landmark size={48} color="#94A3B8" style={styles.emptyIcon} />
@@ -423,7 +436,7 @@ export default function LandlordProperties() {
                   >
                     {selectedImages.map((img, index) => (
                       <View key={`${img.uri}-${index}`} style={styles.imagePreviewWrapper}>
-                        <Image source={{ uri: img.uri }} style={styles.imagePreview} />
+                        <Image source={{ uri: img.uri }} style={styles.imagePreview} contentFit="cover" />
                         <TouchableOpacity
                           style={styles.imageRemoveBtn}
                           onPress={() => handleRemoveImage(index)}
@@ -557,6 +570,7 @@ const styles = StyleSheet.create({
     elevation: 8,
   },
   centered: { flex: 1, justifyContent: 'center', alignItems: 'center' },
+  footerLoader: { paddingVertical: 16, alignItems: 'center' },
   emptyCentered: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 24, marginTop: 60 },
   emptyIcon: { marginBottom: 12 },
   emptyText: { color: '#94A3B8', fontSize: 14, textAlign: 'center' },

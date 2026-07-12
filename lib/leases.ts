@@ -24,6 +24,28 @@ export function leaseTotalRent(monthlyRent: number, startDate: string, endDate: 
   return Number(monthlyRent || 0) * leaseMonthCount(startDate, endDate);
 }
 
+export type LeaseBalance = {
+  charges_total: number;
+  paid_total: number;
+  outstanding: number;
+  deposit_amount: number;
+  deposit_status: string;
+};
+
+/** Charges − verified payments for a lease (server RPC). */
+export async function fetchLeaseBalance(leaseId: string): Promise<LeaseBalance> {
+  const { data, error } = await supabase.rpc('lease_balance', { p_lease_id: leaseId });
+  if (error) throw error;
+  const row = (data || {}) as Record<string, unknown>;
+  return {
+    charges_total: Number(row.charges_total ?? 0),
+    paid_total: Number(row.paid_total ?? 0),
+    outstanding: Number(row.outstanding ?? 0),
+    deposit_amount: Number(row.deposit_amount ?? 0),
+    deposit_status: String(row.deposit_status ?? 'none'),
+  };
+}
+
 /**
  * Returns true when another pending/active lease overlaps the given
  * unit (or whole-property rental when unitId is empty).

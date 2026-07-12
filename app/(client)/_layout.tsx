@@ -1,6 +1,11 @@
 import { Tabs } from 'expo-router';
 import { Home, Calendar, MessageSquare, User } from 'lucide-react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import NotificationBell from '../../components/NotificationBell';
+
+function ClientHeaderBell() {
+  return <NotificationBell href="/(client)/notifications" />;
+}
 
 export default function ClientLayout() {
   const insets = useSafeAreaInsets();
@@ -27,6 +32,8 @@ export default function ClientLayout() {
           fontWeight: 'bold',
           fontSize: 18,
         },
+        headerRight: () => <ClientHeaderBell />,
+        headerRightContainerStyle: { paddingRight: 16 },
       }}
     >
       <Tabs.Screen
@@ -61,7 +68,14 @@ export default function ClientLayout() {
           tabBarIcon: ({ color, size }) => <User color={color} size={size} />,
         }}
       />
-      <Tabs.Screen name="notifications" options={{ href: null, title: 'Notifications' }} />
+      <Tabs.Screen
+        name="notifications"
+        options={{ href: null, title: 'Notifications', headerRight: () => null }}
+      />
+      <Tabs.Screen
+        name="help"
+        options={{ href: null, title: 'Help & Guides' }}
+      />
     </Tabs>
   );
 }

@@ -110,6 +110,12 @@ export default function DatePickerModal({
     return y === currentYear && m === currentMonth && d === day;
   };
 
+  const today = new Date();
+  const isToday = (day: number) =>
+    today.getFullYear() === currentYear &&
+    today.getMonth() === currentMonth &&
+    today.getDate() === day;
+
   return (
     <Modal
       animationType="fade"
@@ -157,12 +163,14 @@ export default function DatePickerModal({
               }
 
               const selected = isSelected(day);
+              const todayDay = isToday(day);
 
               return (
                 <TouchableOpacity
                   key={`day-${day}`}
                   style={[
                     styles.dayCell,
+                    todayDay && !selected && styles.dayCellToday,
                     selected && styles.dayCellSelected,
                   ]}
                   onPress={() => selectDay(day)}
@@ -170,6 +178,7 @@ export default function DatePickerModal({
                   <Text
                     style={[
                       styles.dayText,
+                      todayDay && !selected && styles.dayTextToday,
                       selected && styles.dayTextSelected,
                     ]}
                   >
@@ -280,10 +289,18 @@ const styles = StyleSheet.create({
   dayCellSelected: {
     backgroundColor: '#38BDF8',
   },
+  dayCellToday: {
+    borderWidth: 1.5,
+    borderColor: '#38BDF8',
+  },
   dayText: {
     color: '#E2E8F0',
     fontSize: 14,
     fontWeight: '500',
+  },
+  dayTextToday: {
+    color: '#38BDF8',
+    fontWeight: '700',
   },
   dayTextSelected: {
     color: '#0F172A',

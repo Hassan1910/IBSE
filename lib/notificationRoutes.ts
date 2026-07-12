@@ -30,10 +30,15 @@ export function getNotificationRoute(
           return withId('/(tenant)/feedback', id);
         case 'lease':
           return withId('/(tenant)/agreements', id);
+        case 'message_thread':
+          return withId('/(tenant)/messages', id);
       }
       // Fallbacks when entity_type is missing or announcement
       if (type === 'announcement' || type === 'lease_expiry') {
         return '/(tenant)/dashboard' as Href;
+      }
+      if (type === 'message') {
+        return withId('/(tenant)/messages', id);
       }
       if (type === 'rent_due' || type === 'payment_confirmed' || type === 'payment_submitted') {
         return withId('/(tenant)/rent', id);
@@ -47,16 +52,22 @@ export function getNotificationRoute(
       return '/(tenant)/dashboard' as Href;
     }
 
-    case 'client':
+    case 'client': {
       switch (entityType) {
         case 'booking':
           return withId('/(client)/my-bookings', id);
         case 'feedback':
           return withId('/(client)/feedback', id);
-        default:
-          if (type === 'announcement') return '/(client)/properties' as Href;
-          return null;
       }
+      if (type === 'booking_update') {
+        return withId('/(client)/my-bookings', id);
+      }
+      if (type === 'feedback_reply') {
+        return withId('/(client)/feedback', id);
+      }
+      if (type === 'announcement') return '/(client)/properties' as Href;
+      return '/(client)/properties' as Href;
+    }
 
     case 'landlord':
       switch (entityType) {
@@ -66,7 +77,10 @@ export function getNotificationRoute(
           return withId('/(landlord)/payments', id);
         case 'lease':
           return withId('/(landlord)/agreements', id);
+        case 'message_thread':
+          return withId('/(landlord)/messages', id);
         default:
+          if (type === 'message') return withId('/(landlord)/messages', id);
           if (type === 'announcement') return '/(landlord)/dashboard' as Href;
           return null;
       }
@@ -74,6 +88,9 @@ export function getNotificationRoute(
     case 'admin': {
       if (entityType === 'feedback') return withId('/(admin)/support', id);
       if (entityType === 'lease') return withId('/(admin)/users', id);
+      if (entityType === 'landlord_account_request' || type === 'landlord_request') {
+        return '/(admin)/users' as Href;
+      }
 
       const dashboardTab =
         entityType === 'maintenance'

@@ -122,10 +122,6 @@ export default function LoginScreen() {
   const { getToken, isSignedIn, signOut } = useAuth();
   const router = useRouter();
 
-  // #region agent log
-  console.log('[DEBUG d1d833] LoginScreen render', { clerkSignInLoaded: isLoaded });
-  // #endregion
-
   const [emailAddress, setEmailAddress] = React.useState('');
   const [password, setPassword] = React.useState('');
   const [pendingVerification, setPendingVerification] = React.useState(false);
@@ -313,12 +309,26 @@ export default function LoginScreen() {
               )}
             </TouchableOpacity>
 
+            <TouchableOpacity
+              style={styles.forgotLink}
+              onPress={() => router.push('/(auth)/forgot-password')}
+            >
+              <Text style={styles.link}>Forgot password?</Text>
+            </TouchableOpacity>
+
             <View style={styles.footerLink}>
               <Text style={styles.footerText}>Don't have an account? </Text>
               <TouchableOpacity onPress={() => router.replace('/(auth)/signup')}>
                 <Text style={styles.link}>Sign Up</Text>
               </TouchableOpacity>
             </View>
+
+            <TouchableOpacity
+              style={styles.backToListings}
+              onPress={() => router.replace('/')}
+            >
+              <Text style={styles.link}>Back to listings</Text>
+            </TouchableOpacity>
           </View>
         ) : (
           <View style={styles.card}>
@@ -447,6 +457,14 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'center',
     marginTop: 20,
+  },
+  forgotLink: {
+    alignItems: 'center',
+    marginTop: 14,
+  },
+  backToListings: {
+    alignItems: 'center',
+    marginTop: 16,
   },
   footerText: {
     color: '#94A3B8',

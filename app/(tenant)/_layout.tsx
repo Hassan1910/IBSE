@@ -70,6 +70,7 @@ export default function TenantLayout() {
       />
       <Tabs.Screen name="agreements" options={{ href: null, title: 'My Agreement' }} />
       <Tabs.Screen name="documents" options={{ href: null, title: 'My Documents' }} />
+      <Tabs.Screen name="messages" options={{ href: null, title: 'Lease Messages' }} />
       <Tabs.Screen name="feedback" options={{ href: null, title: 'Feedback & Complaints' }} />
       <Tabs.Screen
         name="notifications"

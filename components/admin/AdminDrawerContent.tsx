@@ -5,8 +5,8 @@ import {
   StyleSheet,
   TouchableOpacity,
   Alert,
-  Image,
 } from 'react-native';
+import { Image } from 'expo-image';
 import {
   DrawerContentScrollView,
   type DrawerContentComponentProps,
@@ -105,7 +105,12 @@ export default function AdminDrawerContent(props: DrawerContentComponentProps) {
       <View style={[styles.footer, { paddingBottom: insets.bottom + adminTheme.spacing.md }]}>
         <View style={styles.userRow}>
           {user?.imageUrl ? (
-            <Image source={{ uri: user.imageUrl }} style={styles.avatar} />
+            <Image
+              source={{ uri: user.imageUrl }}
+              style={styles.avatar}
+              contentFit="cover"
+              cachePolicy="memory-disk"
+            />
           ) : (
             <View style={styles.avatarFallback}>
               <Text style={styles.avatarText}>{firstName.charAt(0).toUpperCase()}</Text>

@@ -6,16 +6,20 @@ import {
   StyleSheet,
   ActivityIndicator,
   Alert,
+  TouchableOpacity,
 } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { supabase } from '../../lib/supabase';
 import { useUser } from '@clerk/clerk-expo';
 import { Calendar, Clock, HelpCircle, CheckCircle, XCircle, CheckCheck } from 'lucide-react-native';
+import { queryKeys } from '../../hooks/queries/keys';
+import { LIST_PERF, PAGE_SIZE } from '../../lib/queryClient';
 
 interface Booking {
   id: string;
   booking_date: string;
-  type: 'viewing' | 'reservation';
+  type: 'viewing';
   status: 'pending' | 'approved' | 'declined' | 'completed' | 'cancelled';
   notes: string;
   properties: {
@@ -24,53 +28,95 @@ interface Booking {
   };
 }
 
+async function fetchClientBookings(userId: string) {
+  const { data, error } = await supabase
+    .from('bookings')
+    .select(
+      `
+      id,
+      booking_date,
+      type,
+      status,
+      notes,
+      properties ( title, location )
+    `
+    )
+    .eq('client_id', userId)
+    .order('booking_date', { ascending: false })
+    .limit(PAGE_SIZE.queues);
+  if (error) throw error;
+  return (data as any as Booking[]) || [];
+}
+
 export default function MyBookingsScreen() {
   const { user } = useUser();
   const router = useRouter();
+  const queryClient = useQueryClient();
   const { id: focusId } = useLocalSearchParams<{ id?: string }>();
-  const [bookings, setBookings] = useState<Booking[]>([]);
-  const [loading, setLoading] = useState(true);
+  const userId = user?.id || '';
   const [highlightedId, setHighlightedId] = useState<string | null>(null);
+  const [cancellingId, setCancellingId] = useState<string | null>(null);
 
-  const fetchMyBookings = async () => {
-    if (!user) return;
+  const bookingsQuery = useQuery({
+    queryKey: queryKeys.clientBookings(userId),
+    queryFn: () => fetchClientBookings(userId),
+    enabled: !!userId,
+  });
 
-    try {
-      setLoading(true);
-      const { data, error } = await supabase
-        .from('bookings')
-        .select(`
-          id,
-          booking_date,
-          type,
-          status,
-          notes,
-          properties ( title, location )
-        `)
-        .eq('client_id', user.id)
-        .order('booking_date', { ascending: false });
-
-      if (error) throw error;
-      setBookings((data as any) || []);
-    } catch (err: any) {
-      console.error('Fetch bookings error:', err);
-      Alert.alert('Error', 'Failed to retrieve your bookings.');
-    } finally {
-      setLoading(false);
-    }
-  };
+  const bookings = bookingsQuery.data || [];
+  const loading = bookingsQuery.isLoading && !bookingsQuery.data;
+  const refreshing = bookingsQuery.isRefetching && !bookingsQuery.isLoading;
 
   useEffect(() => {
-    fetchMyBookings();
-  }, [user]);
+    if (bookingsQuery.isError) {
+      console.error('Fetch bookings error:', bookingsQuery.error);
+      Alert.alert('Error', 'Failed to retrieve your bookings.');
+    }
+  }, [bookingsQuery.isError, bookingsQuery.error]);
 
   useEffect(() => {
     if (!focusId || loading) return;
     if (bookings.some((b) => b.id === focusId)) {
       setHighlightedId(focusId);
       router.setParams({ id: undefined });
+      const timer = setTimeout(() => setHighlightedId(null), 4000);
+      return () => clearTimeout(timer);
     }
   }, [focusId, loading, bookings, router]);
+
+  const handleCancel = (booking: Booking) => {
+    Alert.alert(
+      'Cancel Viewing',
+      `Cancel your viewing request for ${booking.properties?.title || 'this property'}?`,
+      [
+        { text: 'Keep', style: 'cancel' },
+        {
+          text: 'Cancel Request',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              setCancellingId(booking.id);
+              const { error } = await supabase
+                .from('bookings')
+                .update({ status: 'cancelled' })
+                .eq('id', booking.id)
+                .eq('status', 'pending');
+
+              if (error) throw error;
+
+              await queryClient.invalidateQueries({ queryKey: queryKeys.clientBookings(userId) });
+              Alert.alert('Cancelled', 'Your viewing request has been cancelled.');
+            } catch (err: any) {
+              console.error('Cancel booking error:', err);
+              Alert.alert('Error', err.message || 'Failed to cancel booking.');
+            } finally {
+              setCancellingId(null);
+            }
+          },
+        },
+      ]
+    );
+  };
 
   const formatDate = (dateStr: string) => {
     const d = new Date(dateStr);
@@ -132,13 +178,9 @@ export default function MyBookingsScreen() {
 
   return (
     <View style={styles.container}>
-      {loading ? (
+      {loading && bookings.length === 0 ? (
         <View style={styles.centered}>
           <ActivityIndicator size="large" color="#38BDF8" />
-        </View>
-      ) : bookings.length === 0 ? (
-        <View style={styles.centered}>
-          <Text style={styles.emptyText}>You haven't requested any property viewings yet.</Text>
         </View>
       ) : (
         <FlatList
@@ -175,11 +217,33 @@ export default function MyBookingsScreen() {
               {item.notes ? (
                 <Text style={styles.noteText}>Notes: "{item.notes}"</Text>
               ) : null}
+
+              {item.status === 'pending' ? (
+                <TouchableOpacity
+                  style={styles.cancelBtn}
+                  onPress={() => handleCancel(item)}
+                  disabled={cancellingId === item.id}
+                >
+                  {cancellingId === item.id ? (
+                    <ActivityIndicator color="#EF4444" size="small" />
+                  ) : (
+                    <Text style={styles.cancelBtnText}>Cancel Request</Text>
+                  )}
+                </TouchableOpacity>
+              ) : null}
             </View>
           )}
-          contentContainerStyle={styles.listContainer}
-          onRefresh={fetchMyBookings}
-          refreshing={loading}
+          contentContainerStyle={[styles.listContainer, bookings.length === 0 && styles.emptyList]}
+          onRefresh={() => bookingsQuery.refetch()}
+          refreshing={refreshing}
+          initialNumToRender={LIST_PERF.initialNumToRender}
+          windowSize={LIST_PERF.windowSize}
+          maxToRenderPerBatch={LIST_PERF.maxToRenderPerBatch}
+          ListEmptyComponent={
+            <View style={styles.centered}>
+              <Text style={styles.emptyText}>You haven't requested any property viewings yet.</Text>
+            </View>
+          }
         />
       )}
     </View>
@@ -193,6 +257,9 @@ const styles = StyleSheet.create({
   },
   listContainer: {
     padding: 16,
+  },
+  emptyList: {
+    flexGrow: 1,
   },
   card: {
     backgroundColor: '#1E293B',
@@ -251,6 +318,20 @@ const styles = StyleSheet.create({
     backgroundColor: '#0F172A',
     padding: 10,
     borderRadius: 6,
+  },
+  cancelBtn: {
+    marginTop: 12,
+    borderWidth: 1,
+    borderColor: '#EF4444',
+    borderRadius: 8,
+    paddingVertical: 10,
+    alignItems: 'center',
+    backgroundColor: 'rgba(239, 68, 68, 0.1)',
+  },
+  cancelBtnText: {
+    color: '#EF4444',
+    fontWeight: 'bold',
+    fontSize: 14,
   },
   statusBadge: {
     flexDirection: 'row',

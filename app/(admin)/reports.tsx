@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   View,
   Text,
@@ -8,17 +8,20 @@ import {
   ActivityIndicator,
   Alert,
   RefreshControl,
+  Platform,
 } from 'react-native';
-import { supabase } from '../../lib/supabase';
 import { useAudit } from '../../hooks/useAudit';
-import { File, Paths } from 'expo-file-system';
+import { useAdminReportSummary } from '../../hooks/queries/useDashboard';
+import { Directory, File, Paths } from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
+import DatePickerModal from '../../components/DatePickerModal';
 import {
   Home,
   Wallet,
   BedDouble,
   Users as UsersIcon,
   FileText,
+  Calendar,
 } from 'lucide-react-native';
 
 type ReportType = 'property' | 'financial' | 'occupancy' | 'users';
@@ -29,21 +32,49 @@ interface ReportRow {
   accent?: boolean;
 }
 
-interface ReportData {
-  property: ReportRow[];
-  financial: ReportRow[];
-  occupancy: ReportRow[];
-  users: ReportRow[];
+function todayISO() {
+  const d = new Date();
+  const pad = (n: number) => n.toString().padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
-const EMPTY: ReportData = { property: [], financial: [], occupancy: [], users: [] };
+function daysAgoISO(days: number) {
+  const d = new Date();
+  d.setDate(d.getDate() - days);
+  const pad = (n: number) => n.toString().padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+function csvEscape(value: string) {
+  return `"${value.replace(/"/g, '""')}"`;
+}
+
+function isUserCancellation(err: unknown) {
+  const message = err instanceof Error ? err.message : String(err ?? '');
+  return /cancel|dismiss|abort/i.test(message);
+}
+
+function downloadCsvWeb(filename: string, csv: string) {
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  document.body.removeChild(anchor);
+  URL.revokeObjectURL(url);
+}
 
 export default function AdminReportsScreen() {
   const { log } = useAudit();
   const [activeReport, setActiveReport] = useState<ReportType>('property');
-  const [data, setData] = useState<ReportData>(EMPTY);
-  const [loading, setLoading] = useState(true);
-  const [generatedAt, setGeneratedAt] = useState<Date | null>(null);
+  const [fromDate, setFromDate] = useState<string | null>(null);
+  const [toDate, setToDate] = useState<string | null>(null);
+  const [fromPicker, setFromPicker] = useState(false);
+  const [toPicker, setToPicker] = useState(false);
+  const { data: summary, isLoading, isRefetching, refetch, dataUpdatedAt, isError } =
+    useAdminReportSummary(fromDate, toDate);
 
   const formatPrice = (price: number) =>
     new Intl.NumberFormat('en-KE', {
@@ -52,118 +83,59 @@ export default function AdminReportsScreen() {
       maximumFractionDigits: 0,
     }).format(price);
 
-  const buildReports = useCallback(async () => {
-    try {
-      setLoading(true);
-
-      const [
-        propsRes,
-        leasesRes,
-        paymentsRes,
-        expensesRes,
-        profilesRes,
-        bookingsRes,
-        maintenanceRes,
-      ] = await Promise.all([
-        supabase.from('properties').select('type, category, status'),
-        supabase.from('leases').select('status'),
-        supabase.from('payments').select('amount, status'),
-        supabase.from('expenses').select('amount'),
-        supabase.from('profiles').select('role, created_at'),
-        supabase.from('bookings').select('status'),
-        supabase.from('maintenance_requests').select('status'),
-      ]);
-
-      const properties = propsRes.data || [];
-      const leases = leasesRes.data || [];
-      const payments = paymentsRes.data || [];
-      const expenses = expensesRes.data || [];
-      const profiles = profilesRes.data || [];
-      const bookings = bookingsRes.data || [];
-      const maintenance = maintenanceRes.data || [];
-
-      // ---- Property report ----
-      const totalProps = properties.length;
-      const available = properties.filter((p) => p.status === 'available').length;
-      const rented = properties.filter((p) => p.status === 'rented').length;
-      const sold = properties.filter((p) => p.status === 'sold').length;
-      const residential = properties.filter((p) => p.category === 'residential').length;
-      const commercial = properties.filter((p) => p.category === 'commercial').length;
-      const land = properties.filter((p) => p.category === 'land').length;
-
-      const property: ReportRow[] = [
-        { label: 'Total Listings', value: String(totalProps), accent: true },
-        { label: 'Available', value: String(available) },
-        { label: 'Rented', value: String(rented) },
-        { label: 'Sold', value: String(sold) },
-        { label: 'Residential', value: String(residential) },
-        { label: 'Commercial', value: String(commercial) },
-        { label: 'Land', value: String(land) },
-      ];
-
-      // ---- Financial report ----
-      const verifiedRevenue = payments
-        .filter((p) => p.status === 'verified')
-        .reduce((acc, p) => acc + Number(p.amount), 0);
-      const pendingAmount = payments
-        .filter((p) => p.status === 'pending')
-        .reduce((acc, p) => acc + Number(p.amount), 0);
-      const totalExpenses = expenses.reduce((acc, e) => acc + Number(e.amount), 0);
-      const net = verifiedRevenue - totalExpenses;
-
-      const financial: ReportRow[] = [
-        { label: 'Verified Revenue', value: formatPrice(verifiedRevenue), accent: true },
-        { label: 'Total Expenses', value: formatPrice(totalExpenses) },
-        { label: 'Net Position', value: formatPrice(net), accent: true },
-        { label: 'Pending Payments', value: formatPrice(pendingAmount) },
-        { label: 'Payments Recorded', value: String(payments.length) },
-      ];
-
-      // ---- Occupancy report ----
-      const rentalProps = properties.filter((p) => p.type === 'rental').length;
-      const activeLeases = leases.filter((l) => l.status === 'active').length;
-      const occupancyRate = rentalProps > 0 ? Math.round((rented / rentalProps) * 100) : 0;
-
-      const occupancy: ReportRow[] = [
-        { label: 'Occupancy Rate', value: `${occupancyRate}%`, accent: true },
-        { label: 'Rental Units', value: String(rentalProps) },
-        { label: 'Occupied Units', value: String(rented) },
-        { label: 'Vacant Rentals', value: String(Math.max(0, rentalProps - rented)) },
-        { label: 'Active Leases', value: String(activeLeases) },
-        { label: 'Open Maintenance', value: String(maintenance.filter((m) => m.status !== 'resolved').length) },
-      ];
-
-      // ---- User activity report ----
-      const byRole = (role: string) => profiles.filter((p) => p.role === role).length;
-      const now = Date.now();
-      const last30 = profiles.filter(
-        (p) => p.created_at && now - new Date(p.created_at).getTime() < 30 * 24 * 60 * 60 * 1000,
-      ).length;
-
-      const users: ReportRow[] = [
-        { label: 'Total Users', value: String(profiles.length), accent: true },
-        { label: 'Admins', value: String(byRole('admin')) },
-        { label: 'Finance Officers', value: String(byRole('finance')) },
-        { label: 'Landlords', value: String(byRole('landlord')) },
-        { label: 'Tenants', value: String(byRole('tenant')) },
-        { label: 'Clients', value: String(byRole('client')) },
-        { label: 'New (30 days)', value: String(last30) },
-        { label: 'Pending Bookings', value: String(bookings.filter((b) => b.status === 'pending').length) },
-      ];
-
-      setData({ property, financial, occupancy, users });
-      setGeneratedAt(new Date());
-    } catch (err) {
-      console.error('Build reports error:', err);
-      Alert.alert('Error', 'Failed to generate reports.');
-    } finally {
-      setLoading(false);
+  const data = useMemo(() => {
+    if (!summary) {
+      return { property: [] as ReportRow[], financial: [] as ReportRow[], occupancy: [] as ReportRow[], users: [] as ReportRow[] };
     }
-  }, []);
 
-  useEffect(() => {
-    buildReports();
-  }, [buildReports]);
+    const rented = summary.property.rented;
+    const rentalUnits = summary.property.rental_units;
+    const occupancyRate = rentalUnits > 0 ? Math.round((rented / rentalUnits) * 100) : 0;
+    const net = Number(summary.financial.verified_revenue) - Number(summary.financial.total_expenses);
+
+    return {
+      property: [
+        { label: 'Total Listings', value: String(summary.property.total), accent: true },
+        { label: 'Available', value: String(summary.property.available) },
+        { label: 'Rented', value: String(summary.property.rented) },
+        { label: 'Sold', value: String(summary.property.sold) },
+        { label: 'Residential', value: String(summary.property.residential) },
+        { label: 'Commercial', value: String(summary.property.commercial) },
+        { label: 'Land', value: String(summary.property.land) },
+      ],
+      financial: [
+        {
+          label: 'Verified Revenue',
+          value: formatPrice(Number(summary.financial.verified_revenue)),
+          accent: true,
+        },
+        { label: 'Total Expenses', value: formatPrice(Number(summary.financial.total_expenses)) },
+        { label: 'Net Position', value: formatPrice(net), accent: true },
+        {
+          label: 'Pending Payments',
+          value: formatPrice(Number(summary.financial.pending_amount)),
+        },
+        { label: 'Payments Recorded', value: String(summary.financial.payments_count) },
+      ],
+      occupancy: [
+        { label: 'Occupancy Rate', value: `${occupancyRate}%`, accent: true },
+        { label: 'Rental Units', value: String(rentalUnits) },
+        { label: 'Occupied Units', value: String(rented) },
+        { label: 'Vacant Rentals', value: String(Math.max(0, rentalUnits - rented)) },
+        { label: 'Active Leases', value: String(summary.occupancy.active_leases) },
+        { label: 'Open Maintenance', value: String(summary.occupancy.open_maintenance) },
+      ],
+      users: [
+        { label: 'Total Users', value: String(summary.users.total), accent: true },
+        { label: 'Admins', value: String(summary.users.admin) },
+        { label: 'Finance Officers', value: String(summary.users.finance) },
+        { label: 'Landlords', value: String(summary.users.landlord) },
+        { label: 'Tenants', value: String(summary.users.tenant) },
+        { label: 'Clients', value: String(summary.users.client) },
+        { label: 'New (30 days)', value: String(summary.users.new_30_days) },
+      ],
+    };
+  }, [summary]);
 
   const reportTabs: { key: ReportType; label: string; icon: any }[] = [
     { key: 'property', label: 'Property', icon: Home },
@@ -173,45 +145,78 @@ export default function AdminReportsScreen() {
   ];
 
   const rows = data[activeReport];
-
+  const generatedAt = dataUpdatedAt ? new Date(dataUpdatedAt) : null;
   const [exporting, setExporting] = useState(false);
 
-  const csvEscape = (value: string) => `"${value.replace(/"/g, '""')}"`;
+  const buildCsv = () => {
+    const generatedLabel = (generatedAt || new Date()).toLocaleString('en-KE');
+    const rangeLabel = fromDate || toDate ? `${fromDate || '…'} to ${toDate || '…'}` : 'All time';
+    const lines = [
+      'Report,Metric,Value,Date Range,Generated At',
+      ...rows.map((r) =>
+        [activeReport, r.label, r.value, rangeLabel, generatedLabel].map(csvEscape).join(','),
+      ),
+    ];
+    return lines.join('\n');
+  };
 
-  const handleExport = async () => {
-    if (rows.length === 0) {
-      Alert.alert('Nothing to Export', 'Generate the report first by refreshing.');
+  const exportFilename = () => {
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    return `ibsa-${activeReport}-report-${timestamp}.csv`;
+  };
+
+  const logExport = () => {
+    log({
+      action: 'export',
+      entityType: 'report',
+      description: `Exported ${activeReport} report as CSV`,
+    });
+  };
+
+  const saveCsvToDevice = async (csv: string, filename: string) => {
+    if (Platform.OS === 'web') {
+      downloadCsvWeb(filename, csv);
+      logExport();
+      Alert.alert('Download started', 'Your CSV download should begin shortly.');
       return;
     }
 
+    const directory = await Directory.pickDirectoryAsync();
+    const file = directory.createFile(filename, 'text/csv');
+    file.write(csv);
+    logExport();
+    Alert.alert('Saved', 'Report saved to the selected folder.');
+  };
+
+  const shareCsv = async (csv: string, filename: string) => {
+    const file = new File(Paths.cache, filename);
+    file.create({ overwrite: true });
+    file.write(csv);
+    logExport();
+
+    if (await Sharing.isAvailableAsync()) {
+      await Sharing.shareAsync(file.uri, {
+        mimeType: 'text/csv',
+        dialogTitle: `${activeReport.charAt(0).toUpperCase() + activeReport.slice(1)} Report`,
+      });
+      return;
+    }
+
+    Alert.alert('Export Complete', `Report saved to:\n${file.uri}`);
+  };
+
+  const runExportAction = async (action: 'save' | 'share') => {
     try {
       setExporting(true);
-
-      const generatedLabel = (generatedAt || new Date()).toLocaleString('en-KE');
-      const lines = [
-        'Report,Metric,Value,Generated At',
-        ...rows.map((r) =>
-          [activeReport, r.label, r.value, generatedLabel].map(csvEscape).join(','),
-        ),
-      ];
-      const csv = lines.join('\n');
-
-      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-      const file = new File(Paths.cache, `ibsa-${activeReport}-report-${timestamp}.csv`);
-      file.create();
-      file.write(csv);
-
-      log({ action: 'export', entityType: 'report', description: `Exported ${activeReport} report as CSV` });
-
-      if (await Sharing.isAvailableAsync()) {
-        await Sharing.shareAsync(file.uri, {
-          mimeType: 'text/csv',
-          dialogTitle: `${activeReport.charAt(0).toUpperCase() + activeReport.slice(1)} Report`,
-        });
+      const csv = buildCsv();
+      const filename = exportFilename();
+      if (action === 'save') {
+        await saveCsvToDevice(csv, filename);
       } else {
-        Alert.alert('Export Complete', `Report saved to:\n${file.uri}`);
+        await shareCsv(csv, filename);
       }
     } catch (err) {
+      if (isUserCancellation(err)) return;
       console.error('Export report error:', err);
       Alert.alert('Error', 'Failed to export the report.');
     } finally {
@@ -219,16 +224,73 @@ export default function AdminReportsScreen() {
     }
   };
 
+  const handleExport = () => {
+    if (rows.length === 0) {
+      Alert.alert('Nothing to Export', 'Generate the report first by refreshing.');
+      return;
+    }
+
+    Alert.alert('Export CSV', 'Choose how to export this report.', [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Share', onPress: () => void runExportAction('share') },
+      { text: 'Save to device', onPress: () => void runExportAction('save') },
+    ]);
+  };
+
+  const loading = isLoading && !summary;
+
   return (
     <ScrollView
       style={styles.container}
       contentContainerStyle={styles.content}
-      refreshControl={<RefreshControl refreshing={loading} onRefresh={buildReports} tintColor="#38BDF8" />}
+      refreshControl={
+        <RefreshControl refreshing={isRefetching} onRefresh={() => refetch()} tintColor="#38BDF8" />
+      }
     >
       <Text style={styles.intro}>
-        Generate live reports across properties, finances, occupancy, and user activity to support
-        decision-making.
+        Generate live reports across properties, finances, occupancy, and user activity. Date filters
+        apply to financial payment and expense totals.
       </Text>
+
+      <View style={styles.filters}>
+        <TouchableOpacity style={styles.dateBtn} onPress={() => setFromPicker(true)}>
+          <Calendar size={14} color="#38BDF8" />
+          <Text style={styles.dateBtnText}>{fromDate ? `From ${fromDate}` : 'From (all)'}</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.dateBtn} onPress={() => setToPicker(true)}>
+          <Calendar size={14} color="#38BDF8" />
+          <Text style={styles.dateBtnText}>{toDate ? `To ${toDate}` : 'To (all)'}</Text>
+        </TouchableOpacity>
+      </View>
+      <View style={styles.presetRow}>
+        <TouchableOpacity
+          style={styles.preset}
+          onPress={() => {
+            setFromDate(null);
+            setToDate(null);
+          }}
+        >
+          <Text style={styles.presetText}>All time</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={styles.preset}
+          onPress={() => {
+            setFromDate(daysAgoISO(30));
+            setToDate(todayISO());
+          }}
+        >
+          <Text style={styles.presetText}>30d</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={styles.preset}
+          onPress={() => {
+            setFromDate(daysAgoISO(90));
+            setToDate(todayISO());
+          }}
+        >
+          <Text style={styles.presetText}>90d</Text>
+        </TouchableOpacity>
+      </View>
 
       <View style={styles.tabRow}>
         {reportTabs.map((tab) => {
@@ -250,6 +312,13 @@ export default function AdminReportsScreen() {
       {loading ? (
         <View style={styles.centered}>
           <ActivityIndicator size="large" color="#38BDF8" />
+        </View>
+      ) : isError ? (
+        <View style={styles.centered}>
+          <Text style={styles.errorText}>Failed to generate reports.</Text>
+          <TouchableOpacity style={styles.exportBtn} onPress={() => refetch()}>
+            <Text style={styles.exportText}>Retry</Text>
+          </TouchableOpacity>
         </View>
       ) : (
         <View style={styles.card}>
@@ -278,6 +347,35 @@ export default function AdminReportsScreen() {
           </TouchableOpacity>
         </View>
       )}
+
+      <DatePickerModal
+        visible={fromPicker}
+        onClose={() => setFromPicker(false)}
+        value={fromDate || todayISO()}
+        onChange={(d) => {
+          if (toDate && d > toDate) {
+            Alert.alert('Invalid Range', 'From date cannot be after To date.');
+            return;
+          }
+          setFromDate(d);
+          setFromPicker(false);
+        }}
+        title="From date"
+      />
+      <DatePickerModal
+        visible={toPicker}
+        onClose={() => setToPicker(false)}
+        value={toDate || todayISO()}
+        onChange={(d) => {
+          if (fromDate && d < fromDate) {
+            Alert.alert('Invalid Range', 'To date cannot be before From date.');
+            return;
+          }
+          setToDate(d);
+          setToPicker(false);
+        }}
+        title="To date"
+      />
     </ScrollView>
   );
 }
@@ -285,7 +383,30 @@ export default function AdminReportsScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#0F172A' },
   content: { padding: 16, paddingBottom: 40 },
-  intro: { color: '#94A3B8', fontSize: 13, lineHeight: 19, marginBottom: 16 },
+  intro: { color: '#94A3B8', fontSize: 13, lineHeight: 19, marginBottom: 12 },
+  filters: { flexDirection: 'row', gap: 8, marginBottom: 8 },
+  dateBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: '#1E293B',
+    borderWidth: 1,
+    borderColor: '#334155',
+    borderRadius: 8,
+    padding: 10,
+  },
+  dateBtnText: { color: '#CBD5E1', fontSize: 12, fontWeight: '600' },
+  presetRow: { flexDirection: 'row', gap: 8, marginBottom: 16 },
+  preset: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 6,
+    backgroundColor: 'rgba(56,189,248,0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(56,189,248,0.25)',
+  },
+  presetText: { color: '#38BDF8', fontSize: 12, fontWeight: '700' },
   tabRow: {
     flexDirection: 'row',
     backgroundColor: '#1E293B',
@@ -313,32 +434,32 @@ const styles = StyleSheet.create({
   card: {
     backgroundColor: '#1E293B',
     borderRadius: 12,
-    padding: 16,
-    borderColor: '#334155',
     borderWidth: 1,
+    borderColor: '#334155',
+    padding: 16,
   },
   row: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingVertical: 14,
+    paddingVertical: 12,
     borderBottomWidth: 1,
     borderBottomColor: '#334155',
   },
   rowLast: { borderBottomWidth: 0 },
   rowLabel: { color: '#94A3B8', fontSize: 14 },
-  rowValue: { color: '#F8FAFC', fontSize: 15, fontWeight: '600' },
-  rowValueAccent: { color: '#38BDF8', fontWeight: 'bold', fontSize: 16 },
-  generatedText: { color: '#64748B', fontSize: 11, marginTop: 14, textAlign: 'center' },
+  rowValue: { color: '#F8FAFC', fontSize: 14, fontWeight: '700' },
+  rowValueAccent: { color: '#38BDF8' },
+  generatedText: { color: '#64748B', fontSize: 11, marginTop: 8, marginBottom: 12 },
   exportBtn: {
-    flexDirection: 'row',
     backgroundColor: '#38BDF8',
-    borderRadius: 8,
-    paddingVertical: 14,
+    borderRadius: 10,
+    paddingVertical: 12,
+    flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    marginTop: 16,
+    marginTop: 8,
   },
-  exportText: { color: '#0F172A', fontWeight: 'bold', fontSize: 15 },
-  centered: { padding: 40, alignItems: 'center', justifyContent: 'center' },
+  exportText: { color: '#0F172A', fontWeight: '700', fontSize: 14 },
+  centered: { paddingVertical: 40, alignItems: 'center' },
+  errorText: { color: '#EF4444', marginBottom: 12 },
 });

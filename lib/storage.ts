@@ -1,4 +1,5 @@
 import * as ImagePicker from 'expo-image-picker';
+import * as DocumentPicker from 'expo-document-picker';
 import { File } from 'expo-file-system';
 import { Buffer } from 'buffer';
 import { supabase } from './supabase';
@@ -7,6 +8,12 @@ export type PickedImage = {
   uri: string;
   base64?: string | null;
   mimeType?: string | null;
+};
+
+export type PickedDocument = {
+  uri: string;
+  name: string;
+  mimeType: string;
 };
 
 export async function pickImages(allowsMultipleSelection = false): Promise<PickedImage[]> {
@@ -85,5 +92,94 @@ export async function uploadImage(
   }
 
   const { data } = supabase.storage.from(bucket).getPublicUrl(path);
+  return data.publicUrl;
+}
+
+/** Pick a PDF or image contract from the device. */
+export async function pickDocument(): Promise<PickedDocument | null> {
+  const result = await DocumentPicker.getDocumentAsync({
+    type: ['application/pdf', 'image/*'],
+    copyToCacheDirectory: true,
+    multiple: false,
+  });
+  if (result.canceled || !result.assets?.length) return null;
+  const asset = result.assets[0];
+  return {
+    uri: asset.uri,
+    name: asset.name || 'contract.pdf',
+    mimeType: asset.mimeType || 'application/pdf',
+  };
+}
+
+/** Upload a contract PDF/image to the contracts bucket; returns public URL. */
+export async function uploadContract(
+  path: string,
+  doc: PickedDocument,
+): Promise<string> {
+  const file = new File(doc.uri);
+  const arrayBuffer = await file.arrayBuffer();
+  const { error } = await supabase.storage.from('contracts').upload(path, arrayBuffer, {
+    upsert: true,
+    contentType: doc.mimeType,
+  });
+  if (error) throw error;
+  const { data } = supabase.storage.from('contracts').getPublicUrl(path);
+  return data.publicUrl;
+}
+
+/** Upload payment proof (image or PDF) under `{userId}/...`. */
+export async function uploadPaymentProof(
+  userId: string,
+  source: PickedImage | PickedDocument,
+): Promise<string> {
+  const stamp = Date.now();
+  if ('name' in source) {
+    const doc = source;
+    const safeName = doc.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+    const path = `${userId}/${stamp}_${safeName}`;
+    const file = new File(doc.uri);
+    const arrayBuffer = await file.arrayBuffer();
+    const { error } = await supabase.storage.from('payment-proofs').upload(path, arrayBuffer, {
+      upsert: true,
+      contentType: doc.mimeType,
+    });
+    if (error) throw error;
+    const { data } = supabase.storage.from('payment-proofs').getPublicUrl(path);
+    return data.publicUrl;
+  }
+
+  const img = source;
+  const ext = (img.mimeType || guessContentType(img.uri)).split('/')[1] || 'jpg';
+  const path = `${userId}/${stamp}_proof.${ext === 'jpeg' ? 'jpg' : ext}`;
+  return uploadImage('payment-proofs', path, img);
+}
+
+/** Upload a lease vault document (PDF/image) to lease-documents bucket. */
+export async function uploadLeaseDocumentFile(
+  path: string,
+  doc: PickedDocument,
+): Promise<string> {
+  const file = new File(doc.uri);
+  const arrayBuffer = await file.arrayBuffer();
+  const { error } = await supabase.storage.from('lease-documents').upload(path, arrayBuffer, {
+    upsert: true,
+    contentType: doc.mimeType,
+  });
+  if (error) throw error;
+  const { data } = supabase.storage.from('lease-documents').getPublicUrl(path);
+  return data.publicUrl;
+}
+
+/** Upload a generated PDF receipt ArrayBuffer. */
+export async function uploadPaymentReceipt(
+  path: string,
+  arrayBuffer: ArrayBuffer,
+): Promise<string> {
+  const { error } = await supabase.storage.from('payment-receipts').upload(path, arrayBuffer, {
+    upsert: true,
+    contentType: 'application/pdf',
+  });
+  if (error) throw error;
+  const { data } = supabase.storage.from('payment-receipts').getPublicUrl(path);
   return data.publicUrl;
 }

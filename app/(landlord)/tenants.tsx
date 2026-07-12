@@ -24,7 +24,7 @@ import {
 } from '../../lib/leases';
 import DatePickerModal from '../../components/DatePickerModal';
 import NotificationBell from '../../components/NotificationBell';
-import { UserPlus, X, Mail, Phone, Home, Calendar, Users, FilePlus, FileText } from 'lucide-react-native';
+import { UserPlus, X, Mail, Phone, Home, Calendar, Users, FilePlus, FileText, MessageSquare } from 'lucide-react-native';
 
 interface LeaseRow {
   id: string;
@@ -97,6 +97,7 @@ export default function LandlordTenants() {
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
   const [rentAmount, setRentAmount] = useState('');
+  const [depositAmount, setDepositAmount] = useState('');
   const [submittingLease, setSubmittingLease] = useState(false);
   const [loadingLeaseOptions, setLoadingLeaseOptions] = useState(false);
   const [lockTenantSelection, setLockTenantSelection] = useState(false);
@@ -201,6 +202,7 @@ export default function LandlordTenants() {
     setStartDate(todayISODate());
     setEndDate('');
     setRentAmount('');
+    setDepositAmount('');
     setLockTenantSelection(false);
   };
 
@@ -312,6 +314,11 @@ export default function LandlordTenants() {
       Alert.alert('Validation Error', 'Please enter a valid rent amount.');
       return;
     }
+    const deposit = depositAmount.trim() ? parseFloat(depositAmount) : 0;
+    if (isNaN(deposit) || deposit < 0) {
+      Alert.alert('Validation Error', 'Please enter a valid deposit amount (or leave blank).');
+      return;
+    }
     if (!user?.id) {
       Alert.alert('Error', 'Could not determine your account.');
       return;
@@ -347,6 +354,8 @@ export default function LandlordTenants() {
         start_date: startDate,
         end_date: endDate,
         rent_amount: rent,
+        deposit_amount: deposit,
+        deposit_status: deposit > 0 ? 'due' : 'none',
         status: 'pending',
       });
       if (leaseError) throw leaseError;
@@ -377,6 +386,18 @@ export default function LandlordTenants() {
     } finally {
       setSubmittingLease(false);
     }
+  };
+
+  const preferredMessageLeaseId = (leases: LeaseRow[]): string | null => {
+    const candidates = leases.filter((l) => l.status === 'active' || l.status === 'pending');
+    if (!candidates.length) return null;
+    const active = candidates.filter((l) => l.status === 'active');
+    const pool = active.length ? active : candidates;
+    return [...pool].sort((a, b) => b.start_date.localeCompare(a.start_date))[0]?.id ?? null;
+  };
+
+  const openMessage = (leaseId: string) => {
+    router.push({ pathname: '/(landlord)/messages', params: { leaseId } });
   };
 
   const formatPrice = (p: number) =>
@@ -471,17 +492,41 @@ export default function LandlordTenants() {
                       >
                         {l.status === 'pending' ? 'PENDING PAYMENT' : l.status.toUpperCase()}
                       </Text>
+                      {l.status === 'active' || l.status === 'pending' ? (
+                        <TouchableOpacity
+                          style={styles.historyMessageBtn}
+                          onPress={() => openMessage(l.id)}
+                        >
+                          <MessageSquare size={12} color="#38BDF8" style={{ marginRight: 4 }} />
+                          <Text style={styles.historyMessageText}>Message</Text>
+                        </TouchableOpacity>
+                      ) : null}
                     </View>
                   </View>
                 ))}
 
-                <TouchableOpacity
-                  style={styles.assignBtn}
-                  onPress={() => openAssignLease({ tenantId: item.tenantId, tenantName: item.fullName })}
-                >
-                  <FilePlus size={14} color="#0F172A" style={{ marginRight: 6 }} />
-                  <Text style={styles.assignBtnText}>Assign Lease</Text>
-                </TouchableOpacity>
+                <View style={styles.cardActions}>
+                  {(() => {
+                    const leaseId = preferredMessageLeaseId(item.leases);
+                    if (!leaseId) return null;
+                    return (
+                      <TouchableOpacity
+                        style={styles.messageBtn}
+                        onPress={() => openMessage(leaseId)}
+                      >
+                        <MessageSquare size={14} color="#38BDF8" style={{ marginRight: 6 }} />
+                        <Text style={styles.messageBtnText}>Message</Text>
+                      </TouchableOpacity>
+                    );
+                  })()}
+                  <TouchableOpacity
+                    style={styles.assignBtn}
+                    onPress={() => openAssignLease({ tenantId: item.tenantId, tenantName: item.fullName })}
+                  >
+                    <FilePlus size={14} color="#0F172A" style={{ marginRight: 6 }} />
+                    <Text style={styles.assignBtnText}>Assign Lease</Text>
+                  </TouchableOpacity>
+                </View>
               </View>
             )}
             contentContainerStyle={styles.listContainer}
@@ -743,6 +788,18 @@ export default function LandlordTenants() {
                     />
                   </View>
 
+                  <View style={styles.inputGroup}>
+                    <Text style={styles.label}>Security Deposit (KES, optional)</Text>
+                    <TextInput
+                      style={styles.modalInput}
+                      placeholder="e.g. 50000"
+                      placeholderTextColor="#999"
+                      value={depositAmount}
+                      onChangeText={setDepositAmount}
+                      keyboardType="numeric"
+                    />
+                  </View>
+
                   <TouchableOpacity
                     style={styles.submitBtn}
                     onPress={handleAssignLease}
@@ -839,8 +896,26 @@ const styles = StyleSheet.create({
   historyDate: { color: '#64748B', fontSize: 11 },
   historyRent: { color: '#38BDF8', fontSize: 13, fontWeight: 'bold' },
   historyStatus: { fontSize: 10, fontWeight: 'bold', marginTop: 2 },
+  historyMessageBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 6,
+  },
+  historyMessageText: { color: '#38BDF8', fontSize: 11, fontWeight: '600' },
+  cardActions: { marginTop: 8, gap: 8 },
+  messageBtn: {
+    backgroundColor: 'transparent',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#38BDF8',
+    paddingVertical: 10,
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'center',
+  },
+  messageBtnText: { color: '#38BDF8', fontWeight: 'bold', fontSize: 13 },
   assignBtn: {
-    marginTop: 8,
+    marginTop: 0,
     backgroundColor: '#38BDF8',
     borderRadius: 8,
     paddingVertical: 10,

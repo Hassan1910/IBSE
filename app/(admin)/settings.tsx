@@ -39,6 +39,30 @@ export default function AdminSettingsScreen() {
   const [editing, setEditing] = useState<Setting | null>(null);
   const [draftValue, setDraftValue] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [runningAlerts, setRunningAlerts] = useState(false);
+
+  const runScheduledAlerts = async () => {
+    try {
+      setRunningAlerts(true);
+      const { data, error } = await supabase.functions.invoke('scheduled-alerts', { body: {} });
+      if (error) throw error;
+      const alerts = data?.alerts || {};
+      Alert.alert(
+        'Alerts Ran',
+        `Rent due: ${alerts.rent_due ?? 0}\nLease expiry: ${alerts.lease_expiry ?? 0}\nPush sent: ${data?.pushSent ?? 0}`,
+      );
+      log({
+        action: 'create',
+        entityType: 'notification',
+        description: 'Manually ran scheduled rent/lease alerts',
+      });
+    } catch (err: any) {
+      console.error('Run scheduled alerts error:', err);
+      Alert.alert('Error', err.message || 'Failed to run scheduled alerts.');
+    } finally {
+      setRunningAlerts(false);
+    }
+  };
 
   const fetchSettings = useCallback(async () => {
     try {
@@ -162,6 +186,27 @@ export default function AdminSettingsScreen() {
           ))}
 
           <View style={styles.section}>
+            <Text style={styles.sectionTitle}>AUTOMATION</Text>
+            <View style={styles.card}>
+              <Text style={styles.settingLabel}>Scheduled Alerts</Text>
+              <Text style={styles.settingDesc}>
+                Generate rent_due and lease_expiry in-app notifications (and push when tokens exist). Prefer daily cron via CRON_SECRET; you can also run manually here.
+              </Text>
+              <TouchableOpacity
+                style={styles.alertsBtn}
+                onPress={runScheduledAlerts}
+                disabled={runningAlerts}
+              >
+                {runningAlerts ? (
+                  <ActivityIndicator color="#0F172A" />
+                ) : (
+                  <Text style={styles.alertsBtnText}>Run Alerts Now</Text>
+                )}
+              </TouchableOpacity>
+            </View>
+          </View>
+
+          <View style={styles.section}>
             <Text style={styles.sectionTitle}>ABOUT</Text>
             <View style={styles.card}>
               <View style={styles.aboutRow}>
@@ -251,6 +296,14 @@ const styles = StyleSheet.create({
   aboutRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 14, borderBottomWidth: 1, borderBottomColor: '#334155' },
   aboutText: { color: '#F8FAFC', fontSize: 15, flex: 1 },
   aboutValue: { color: '#94A3B8', fontSize: 14, fontWeight: '600' },
+  alertsBtn: {
+    marginTop: 12,
+    backgroundColor: '#38BDF8',
+    borderRadius: 10,
+    paddingVertical: 12,
+    alignItems: 'center',
+  },
+  alertsBtnText: { color: '#0F172A', fontWeight: '700' },
   modalOverlay: { flex: 1, backgroundColor: 'rgba(15, 23, 42, 0.8)', justifyContent: 'flex-end' },
   modalContent: { backgroundColor: '#1E293B', borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 24 },
   modalHeader: {

@@ -17,9 +17,10 @@ import { supabase, setSupabaseToken } from '../../lib/supabase';
 import { logAudit } from '../../lib/audit';
 import { resolveInvite, markInviteAccepted, hasPendingInvite } from '../../lib/invites';
 import { isPublicSignupAllowed } from '../../lib/settings';
+import RequestLandlordAccountModal from '../../components/RequestLandlordAccountModal';
 
-// Staff roles (landlord, finance, admin) are invite-only when public
-// signup is disabled: the administrator pre-registers those emails.
+// Client and tenant self-register. Landlord accounts are admin-created
+// after a request; finance/admin are invite-only.
 const ROLES = [
   { label: 'Client (Property Browser)', value: 'client' },
   { label: 'Tenant (Renter)', value: 'tenant' },
@@ -38,6 +39,7 @@ export default function SignUpScreen() {
   const [pendingVerification, setPendingVerification] = React.useState(false);
   const [code, setCode] = React.useState('');
   const [loading, setLoading] = React.useState(false);
+  const [landlordRequestVisible, setLandlordRequestVisible] = React.useState(false);
 
   const completeSignUpFlow = async (createdUserId: string | null | undefined, createdSessionId: string | null | undefined) => {
     if (!createdSessionId || !setActive) {
@@ -256,8 +258,16 @@ export default function SignUpScreen() {
                 ))}
               </View>
               <Text style={styles.roleHint}>
-                Staff and landlord accounts are created by invitation from the administrator.
+                Landlord accounts are created by IBSA after review — request access below.
+                Staff accounts (finance/admin) are invited by an administrator.
               </Text>
+              <TouchableOpacity
+                style={styles.landlordRequestLink}
+                onPress={() => setLandlordRequestVisible(true)}
+                accessibilityRole="button"
+              >
+                <Text style={styles.link}>Request a landlord account</Text>
+              </TouchableOpacity>
             </View>
 
             <TouchableOpacity style={styles.submitButton} onPress={onSignUpPress} disabled={loading}>
@@ -274,6 +284,13 @@ export default function SignUpScreen() {
                 <Text style={styles.link}>Log In</Text>
               </TouchableOpacity>
             </View>
+
+            <TouchableOpacity
+              style={styles.backToListings}
+              onPress={() => router.replace('/')}
+            >
+              <Text style={styles.link}>Back to listings</Text>
+            </TouchableOpacity>
           </View>
         ) : (
           <View style={styles.card}>
@@ -314,6 +331,11 @@ export default function SignUpScreen() {
           </View>
         )}
       </ScrollView>
+
+      <RequestLandlordAccountModal
+        visible={landlordRequestVisible}
+        onClose={() => setLandlordRequestVisible(false)}
+      />
     </KeyboardAvoidingView>
   );
 }
@@ -412,6 +434,10 @@ const styles = StyleSheet.create({
     marginTop: 4,
     lineHeight: 17,
   },
+  landlordRequestLink: {
+    marginTop: 10,
+    alignSelf: 'flex-start',
+  },
   submitButton: {
     backgroundColor: '#38BDF8',
     borderRadius: 8,
@@ -433,6 +459,10 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'center',
     marginTop: 20,
+  },
+  backToListings: {
+    alignItems: 'center',
+    marginTop: 16,
   },
   footerText: {
     color: '#94A3B8',

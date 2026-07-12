@@ -13,6 +13,7 @@ import {
   Platform,
 } from 'react-native';
 import { supabase } from '../../lib/supabase';
+import { notifyAdmins } from '../../lib/notifications';
 import { useUser } from '@clerk/clerk-expo';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Send, MessageSquare, AlertCircle, HelpCircle } from 'lucide-react-native';
@@ -72,6 +73,8 @@ export default function FeedbackScreen() {
       setMode('history');
       setHighlightedId(focusId);
       router.setParams({ id: undefined });
+      const timer = setTimeout(() => setHighlightedId(null), 4000);
+      return () => clearTimeout(timer);
     }
   }, [focusId, router]);
 
@@ -82,7 +85,10 @@ export default function FeedbackScreen() {
   }, [mode, fetchHistory]);
 
   const handleSubmit = async () => {
-    if (!user) return;
+    if (!user) {
+      Alert.alert('Sign in required', 'Please sign in again to submit feedback.');
+      return;
+    }
 
     if (!message.trim()) {
       Alert.alert('Validation Error', 'Please type a message before submitting.');
@@ -92,16 +98,36 @@ export default function FeedbackScreen() {
     try {
       setSubmitting(true);
 
-      const { error } = await supabase.from('feedback').insert({
-        user_id: user.id,
-        type: feedbackType,
-        message: message.trim(),
-      });
+      const { data: created, error } = await supabase
+        .from('feedback')
+        .insert({
+          user_id: user.id,
+          type: feedbackType,
+          message: message.trim(),
+        })
+        .select('id')
+        .single();
 
       if (error) throw error;
 
-      Alert.alert('Thank You! 🌟', 'Your submission has been received. Our team will review and follow up if necessary.');
+      try {
+        await notifyAdmins({
+          type: 'feedback_reply',
+          title: 'New Client Feedback',
+          body: `${user.fullName || 'A client'} submitted a ${feedbackType}.`,
+          entityType: 'feedback',
+          entityId: created?.id,
+        });
+      } catch (notifyErr) {
+        console.error('Notify admins (feedback) error:', notifyErr);
+      }
+
+      Alert.alert(
+        'Thank You!',
+        'Your submission has been received. Our team will review and follow up if necessary.'
+      );
       setMessage('');
+      setMode('history');
     } catch (err: any) {
       console.error('Feedback submission error:', err);
       Alert.alert('Error', err.message || 'Failed to submit feedback.');
@@ -129,7 +155,7 @@ export default function FeedbackScreen() {
   if (mode === 'history') {
     return (
       <View style={styles.container}>
-        {renderModeToggle()}
+        <View style={styles.historyHeaderPad}>{renderModeToggle()}</View>
         {loadingHistory ? (
           <View style={styles.centered}>
             <ActivityIndicator size="large" color="#38BDF8" />
@@ -411,7 +437,12 @@ const styles = StyleSheet.create({
   },
   historyList: {
     padding: 16,
+    paddingTop: 0,
     flexGrow: 1,
+  },
+  historyHeaderPad: {
+    paddingHorizontal: 16,
+    paddingTop: 16,
   },
   historyCard: {
     backgroundColor: '#1E293B',

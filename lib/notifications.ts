@@ -1,4 +1,5 @@
 import { supabase } from './supabase';
+import { dispatchPush } from './push';
 
 export type NotificationType =
   | 'rent_due'
@@ -8,7 +9,9 @@ export type NotificationType =
   | 'lease_expiry'
   | 'announcement'
   | 'feedback_reply'
-  | 'booking_update';
+  | 'booking_update'
+  | 'message'
+  | 'landlord_request';
 
 export interface AppNotification {
   id: string;
@@ -72,7 +75,49 @@ export async function notifyUser(input: NotifyUserInput) {
     entity_id: input.entityId ?? null,
   });
   if (error) throw error;
+  void dispatchPush({
+    userId: input.userId,
+    title: input.title,
+    body: input.body,
+    data: {
+      type: input.type,
+      entityType: input.entityType || '',
+      entityId: input.entityId || '',
+    },
+  });
   return { data, error: null };
+}
+
+/** Notify all admin profiles (SECURITY DEFINER RPC; usable by clients). */
+export async function notifyAdmins(input: Omit<NotifyUserInput, 'userId'>) {
+  const { error } = await supabase.rpc('notify_admins', {
+    p_type: input.type,
+    p_title: input.title,
+    p_body: input.body,
+    p_entity_type: input.entityType ?? null,
+    p_entity_id: input.entityId ?? null,
+  });
+  if (error) throw error;
+
+  try {
+    const { data: admins } = await supabase.from('profiles').select('id').eq('role', 'admin');
+    const userIds = (admins || []).map((a) => a.id);
+    if (userIds.length) {
+      void dispatchPush({
+        userIds,
+        title: input.title,
+        body: input.body,
+        data: {
+          type: input.type,
+          entityType: input.entityType || '',
+          entityId: input.entityId || '',
+        },
+      });
+    }
+  } catch {
+    // Push is best-effort; RLS may block client listing admins — that's ok.
+  }
+  return { data: null, error: null };
 }
 
 /** Notify the landlord who owns a property (or admins when owner_id is null). */
@@ -93,5 +138,27 @@ export async function notifyPropertyOwner(input: {
     p_entity_id: input.entityId ?? null,
   });
   if (error) throw error;
+
+  try {
+    const { data: prop } = await supabase
+      .from('properties')
+      .select('owner_id')
+      .eq('id', input.propertyId)
+      .maybeSingle();
+    if (prop?.owner_id) {
+      void dispatchPush({
+        userId: prop.owner_id,
+        title: input.title,
+        body: input.body,
+        data: {
+          type: input.type,
+          entityType: input.entityType || '',
+          entityId: input.entityId || '',
+        },
+      });
+    }
+  } catch {
+    // best-effort
+  }
   return { data: null, error: null };
 }

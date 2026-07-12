@@ -71,10 +71,6 @@ export default function LandlordUnits() {
     }
   }, [propertyId, user?.id]);
 
-  useEffect(() => {
-    fetchUnits();
-  }, [fetchUnits]);
-
   useFocusEffect(
     useCallback(() => {
       fetchUnits();

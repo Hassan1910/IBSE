@@ -13,6 +13,7 @@ import {
 } from 'react-native';
 import { supabase } from '../../lib/supabase';
 import { useUser } from '@clerk/clerk-expo';
+import { useQueryClient } from '@tanstack/react-query';
 import { useAudit } from '../../hooks/useAudit';
 import {
   AssignableUnit,
@@ -22,8 +23,17 @@ import {
   promoteClientToTenant,
 } from '../../lib/leases';
 import { createInvite, type InviteRole as InviteEmailRole } from '../../lib/invites';
-import { X, Shield, Calendar, Trash2, UserPlus, KeyRound, Mail } from 'lucide-react-native';
+import {
+  fetchPendingLandlordRequests,
+  resolveLandlordRequest,
+  type LandlordAccountRequest,
+} from '../../lib/landlordRequests';
+import { X, Shield, Calendar, Trash2, UserPlus, KeyRound, Mail, Users } from 'lucide-react-native';
 import DatePickerModal from '../../components/DatePickerModal';
+import { useInfiniteList } from '../../hooks/queries/useInfiniteList';
+import { fetchAdminUsersPage } from '../../hooks/queries/fetchers';
+import { queryKeys } from '../../hooks/queries/keys';
+import { LIST_PERF, PAGE_SIZE } from '../../lib/queryClient';
 
 interface Profile {
   id: string;
@@ -65,11 +75,26 @@ const todayISODate = () => {
 export default function AdminUsersScreen() {
   const { user } = useUser();
   const { log } = useAudit();
-  const [users, setUsers] = useState<Profile[]>([]);
+  const queryClient = useQueryClient();
+  const {
+    items: users,
+    loading,
+    refreshing,
+    loadingMore,
+    error,
+    refresh,
+    loadMore,
+  } = useInfiniteList<Profile>(
+    queryKeys.adminUsers,
+    (page) => fetchAdminUsersPage(page) as Promise<Profile[]>,
+    PAGE_SIZE.tables
+  );
   const [properties, setProperties] = useState<Property[]>([]);
   const [rentalPropertyCount, setRentalPropertyCount] = useState(0);
   const [loadingProperties, setLoadingProperties] = useState(false);
-  const [loading, setLoading] = useState(true);
+
+  const invalidateUsers = () =>
+    queryClient.invalidateQueries({ queryKey: queryKeys.adminUsers });
 
   // Create account / invite modal states
   const [inviteModalVisible, setInviteModalVisible] = useState(false);
@@ -98,6 +123,22 @@ export default function AdminUsersScreen() {
   // Role Edit Modal
   const [roleModalVisible, setRoleModalVisible] = useState(false);
   const [selectedRole, setSelectedRole] = useState<'admin' | 'finance' | 'tenant' | 'client' | 'landlord'>('client');
+
+  const [landlordRequests, setLandlordRequests] = useState<LandlordAccountRequest[]>([]);
+  const [loadingLandlordRequests, setLoadingLandlordRequests] = useState(false);
+  const [fulfillingRequestId, setFulfillingRequestId] = useState<string | null>(null);
+
+  const loadLandlordRequests = async () => {
+    try {
+      setLoadingLandlordRequests(true);
+      const rows = await fetchPendingLandlordRequests();
+      setLandlordRequests(rows);
+    } catch (err) {
+      console.error('Fetch landlord account requests error:', err);
+    } finally {
+      setLoadingLandlordRequests(false);
+    }
+  };
 
   const fetchAvailableProperties = async () => {
     try {
@@ -132,30 +173,58 @@ export default function AdminUsersScreen() {
     }
   };
 
-  const fetchData = async () => {
-    try {
-      setLoading(true);
-
-      const { data: userData, error: userError } = await supabase
-        .from('profiles')
-        .select('*')
-        .order('full_name', { ascending: true });
-
-      if (userError) throw userError;
-      setUsers(userData || []);
-
-      await fetchAvailableProperties();
-    } catch (err: any) {
-      console.error('Fetch admin data error:', err);
+  useEffect(() => {
+    if (error) {
+      console.error('Fetch admin data error:', error);
       Alert.alert('Error', 'Failed to retrieve user registry.');
-    } finally {
-      setLoading(false);
     }
-  };
+  }, [error]);
 
   useEffect(() => {
-    fetchData();
+    fetchAvailableProperties();
+    void loadLandlordRequests();
   }, []);
+
+  const openCreateFromLandlordRequest = (request: LandlordAccountRequest) => {
+    setFulfillingRequestId(request.id);
+    setProvisionMode('account');
+    setInviteRole('landlord');
+    setNewEmail(request.email);
+    setNewUsername(request.full_name);
+    setNewPassword('');
+    setConfirmPassword('');
+    setInviteModalVisible(true);
+  };
+
+  const handleDismissLandlordRequest = (request: LandlordAccountRequest) => {
+    if (!user?.id) return;
+    Alert.alert(
+      'Dismiss request',
+      `Dismiss the landlord request from ${request.full_name}?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Dismiss',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await resolveLandlordRequest(request.id, 'dismissed', user.id);
+              log({
+                action: 'update',
+                entityType: 'landlord_account_request',
+                entityId: request.id,
+                description: `Dismissed landlord request from ${request.email}`,
+              });
+              await loadLandlordRequests();
+            } catch (err: any) {
+              console.error('Dismiss landlord request error:', err);
+              Alert.alert('Error', err?.message || 'Failed to dismiss request.');
+            }
+          },
+        },
+      ],
+    );
+  };
 
   const handleUpdateRole = async () => {
     if (!selectedUser) return;
@@ -175,7 +244,7 @@ export default function AdminUsersScreen() {
       });
       Alert.alert('Success', `${selectedUser.full_name}'s role updated to ${selectedRole}.`);
       setRoleModalVisible(false);
-      fetchData();
+      await invalidateUsers();
     } catch (err: any) {
       console.error('Update role error:', err);
       Alert.alert('Error', 'Failed to update user role.');
@@ -207,15 +276,28 @@ export default function AdminUsersScreen() {
           fullName: username || null,
           invitedBy: user?.id ?? null,
         });
+
+        let inviteMessage = `${email} can now sign up. Their role will be set to ${inviteRole} automatically.`;
+        try {
+          const { data: inviteResult, error: inviteSendError } = await supabase.functions.invoke(
+            'send-invite-email',
+            { body: { email, role: inviteRole, fullName: username || null } },
+          );
+          if (!inviteSendError && inviteResult?.signupUrl) {
+            inviteMessage = inviteResult.emailSent
+              ? `Invite email sent to ${email}. Signup link: ${inviteResult.signupUrl}`
+              : `Invite saved. Share this signup link with ${email}:\n\n${inviteResult.signupUrl}`;
+          }
+        } catch (sendErr) {
+          console.warn('Invite email send skipped:', sendErr);
+        }
+
         log({
           action: 'create',
           entityType: 'invite',
           description: `Invited ${email} as ${inviteRole}`,
         });
-        Alert.alert(
-          'Invite Saved',
-          `${email} can now sign up. Their role will be set to ${inviteRole} automatically.`,
-        );
+        Alert.alert('Invite Saved', inviteMessage);
         setInviteModalVisible(false);
         setNewEmail('');
         setNewUsername('');
@@ -265,6 +347,21 @@ export default function AdminUsersScreen() {
         entityId: data?.userId,
         description: `Created account for ${email} as ${inviteRole}`,
       });
+
+      if (fulfillingRequestId && inviteRole === 'landlord' && user?.id) {
+        try {
+          await resolveLandlordRequest(fulfillingRequestId, 'fulfilled', user.id);
+          log({
+            action: 'update',
+            entityType: 'landlord_account_request',
+            entityId: fulfillingRequestId,
+            description: `Fulfilled landlord request for ${email}`,
+          });
+        } catch (resolveErr) {
+          console.warn('Failed to mark landlord request fulfilled:', resolveErr);
+        }
+      }
+
       Alert.alert(
         'Account Created',
         `An account for ${email} was created with the ${inviteRole} role. Share these login credentials with the user:\n\nEmail: ${email}\nPassword: (the one you set)\n\nThey can change their password later from their profile.`,
@@ -275,7 +372,9 @@ export default function AdminUsersScreen() {
       setNewPassword('');
       setConfirmPassword('');
       setInviteRole('client');
-      fetchData();
+      setFulfillingRequestId(null);
+      await invalidateUsers();
+      await loadLandlordRequests();
     } catch (err: any) {
       console.error('Create user error:', err);
       Alert.alert('Error', err?.message || 'Failed to create the user account.');
@@ -357,7 +456,7 @@ export default function AdminUsersScreen() {
                 description: `Deleted ${fullName}`,
               });
               Alert.alert('Success', 'User account deleted.');
-              setUsers((prev) => prev.filter((u) => u.id !== id));
+              await invalidateUsers();
             } catch (err) {
               console.error('Delete user error:', err);
               Alert.alert('Error', 'Failed to delete user.');
@@ -451,7 +550,8 @@ export default function AdminUsersScreen() {
       setStartDate(todayISODate());
       setEndDate('');
       setRentAmount('');
-      fetchData();
+      await invalidateUsers();
+      await fetchAvailableProperties();
     } catch (err: any) {
       console.error('Create lease error:', err);
       Alert.alert('Error', leaseAssignErrorMessage(err));
@@ -496,7 +596,7 @@ export default function AdminUsersScreen() {
 
   return (
     <View style={styles.container}>
-      {loading ? (
+      {loading && users.length === 0 ? (
         <View style={styles.centered}>
           <ActivityIndicator size="large" color="#38BDF8" />
         </View>
@@ -505,6 +605,7 @@ export default function AdminUsersScreen() {
         <FlatList
           data={users}
           keyExtractor={(item) => item.id}
+          {...LIST_PERF}
           renderItem={({ item }) => (
             <View style={styles.card}>
               <View style={styles.cardHeader}>
@@ -522,7 +623,7 @@ export default function AdminUsersScreen() {
                   onPress={() => openRoleModal(item)}
                 >
                   <Shield size={14} color="#38BDF8" style={styles.btnIcon} />
-                  <Text style={styles.roleBtnText}>Change Role</Text>
+                  <Text style={styles.roleBtnText}>Role</Text>
                 </TouchableOpacity>
 
                 {(item.role === 'client' || item.role === 'tenant') && (
@@ -531,10 +632,10 @@ export default function AdminUsersScreen() {
                     onPress={() => openLeaseModal(item)}
                   >
                     <Calendar size={14} color="#0F172A" style={styles.btnIcon} />
-                    <Text style={styles.leaseBtnText}>Allocate Lease</Text>
+                    <Text style={styles.leaseBtnText}>Lease</Text>
                   </TouchableOpacity>
                 )}
-                
+
                 {item.role !== 'admin' && (
                   <TouchableOpacity
                     style={[styles.btn, styles.deleteUserBtn]}
@@ -556,12 +657,65 @@ export default function AdminUsersScreen() {
             </View>
           )}
           contentContainerStyle={styles.listContainer}
-          onRefresh={fetchData}
-          refreshing={loading}
+          onRefresh={async () => {
+            await Promise.all([refresh(), loadLandlordRequests()]);
+          }}
+          refreshing={refreshing || loadingLandlordRequests}
+          onEndReached={loadMore}
+          onEndReachedThreshold={0.4}
+          ListHeaderComponent={
+            landlordRequests.length === 0 ? null : (
+              <View style={styles.requestsPanel}>
+                <Text style={styles.requestsTitle}>Landlord account requests</Text>
+                <Text style={styles.requestsLead}>
+                  Create an account for each requester, then share login credentials with them.
+                </Text>
+                {landlordRequests.map((request) => (
+                  <View key={request.id} style={styles.requestCard}>
+                    <Text style={styles.requestName}>{request.full_name}</Text>
+                    <Text style={styles.requestMeta}>{request.email}</Text>
+                    <Text style={styles.requestMeta}>{request.phone}</Text>
+                    {request.note ? (
+                      <Text style={styles.requestNote}>{request.note}</Text>
+                    ) : null}
+                    <View style={styles.requestActions}>
+                      <TouchableOpacity
+                        style={[styles.btn, styles.leaseBtn]}
+                        onPress={() => openCreateFromLandlordRequest(request)}
+                      >
+                        <UserPlus size={14} color="#0F172A" style={styles.btnIcon} />
+                        <Text style={styles.leaseBtnText}>Create account</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        style={[styles.btn, styles.deleteUserBtn]}
+                        onPress={() => handleDismissLandlordRequest(request)}
+                      >
+                        <Text style={styles.deleteUserBtnText}>Dismiss</Text>
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                ))}
+              </View>
+            )
+          }
+          ListFooterComponent={
+            loadingMore ? (
+              <View style={styles.loadingMore}>
+                <ActivityIndicator color="#38BDF8" />
+              </View>
+            ) : null
+          }
+          ListEmptyComponent={
+            <View style={styles.emptyCentered}>
+              <Users size={48} color="#94A3B8" style={{ marginBottom: 12 }} />
+              <Text style={styles.emptyText}>No users in the registry yet.</Text>
+            </View>
+          }
         />
         <TouchableOpacity
           style={styles.fab}
           onPress={() => {
+            setFulfillingRequestId(null);
             setProvisionMode('account');
             setInviteModalVisible(true);
           }}
@@ -576,7 +730,10 @@ export default function AdminUsersScreen() {
         animationType="slide"
         transparent
         visible={inviteModalVisible}
-        onRequestClose={() => setInviteModalVisible(false)}
+        onRequestClose={() => {
+          setInviteModalVisible(false);
+          setFulfillingRequestId(null);
+        }}
       >
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
@@ -584,7 +741,12 @@ export default function AdminUsersScreen() {
               <Text style={styles.modalTitle}>
                 {provisionMode === 'invite' ? 'Invite User' : 'Create User Account'}
               </Text>
-              <TouchableOpacity onPress={() => setInviteModalVisible(false)}>
+              <TouchableOpacity
+                onPress={() => {
+                  setInviteModalVisible(false);
+                  setFulfillingRequestId(null);
+                }}
+              >
                 <X size={24} color="#94A3B8" />
               </TouchableOpacity>
             </View>
@@ -952,6 +1114,72 @@ const styles = StyleSheet.create({
   listContainer: {
     padding: 16,
   },
+  requestsPanel: {
+    marginBottom: 16,
+    padding: 14,
+    borderRadius: 12,
+    backgroundColor: '#1E293B',
+    borderWidth: 1,
+    borderColor: '#334155',
+  },
+  requestsTitle: {
+    color: '#F8FAFC',
+    fontSize: 16,
+    fontWeight: '700',
+    marginBottom: 4,
+  },
+  requestsLead: {
+    color: '#94A3B8',
+    fontSize: 13,
+    lineHeight: 18,
+    marginBottom: 12,
+  },
+  requestCard: {
+    backgroundColor: '#0F172A',
+    borderRadius: 10,
+    padding: 12,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: '#334155',
+  },
+  requestName: {
+    color: '#F8FAFC',
+    fontSize: 15,
+    fontWeight: '700',
+    marginBottom: 2,
+  },
+  requestMeta: {
+    color: '#94A3B8',
+    fontSize: 13,
+    marginTop: 2,
+  },
+  requestNote: {
+    color: '#CBD5E1',
+    fontSize: 13,
+    lineHeight: 18,
+    marginTop: 8,
+  },
+  requestActions: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginTop: 12,
+  },
+  loadingMore: {
+    paddingVertical: 16,
+    alignItems: 'center',
+  },
+  emptyCentered: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 32,
+    marginTop: 40,
+  },
+  emptyText: {
+    color: '#94A3B8',
+    fontSize: 14,
+    textAlign: 'center',
+  },
   card: {
     backgroundColor: '#1E293B',
     borderRadius: 12,
@@ -991,23 +1219,27 @@ const styles = StyleSheet.create({
   },
   actionRow: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
     marginTop: 14,
     borderTopWidth: 1,
     borderTopColor: '#334155',
     paddingTop: 14,
   },
   btn: {
-    flex: 1,
+    flexGrow: 1,
+    flexBasis: '30%',
+    minWidth: 96,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     paddingVertical: 10,
+    paddingHorizontal: 8,
     borderRadius: 8,
   },
   roleBtn: {
     borderColor: '#38BDF8',
     borderWidth: 1,
-    marginRight: 6,
   },
   roleBtnText: {
     color: '#38BDF8',
@@ -1016,7 +1248,6 @@ const styles = StyleSheet.create({
   },
   leaseBtn: {
     backgroundColor: '#38BDF8',
-    marginLeft: 6,
   },
   leaseBtnText: {
     color: '#0F172A',
@@ -1030,7 +1261,6 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(239, 68, 68, 0.4)',
     borderWidth: 1,
     backgroundColor: 'rgba(239, 68, 68, 0.05)',
-    marginLeft: 6,
   },
   deleteUserBtnText: {
     color: '#EF4444',

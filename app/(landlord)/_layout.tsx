@@ -75,6 +75,8 @@ export default function LandlordLayout() {
       <Tabs.Screen name="units" options={{ href: null, title: 'Manage Units' }} />
       <Tabs.Screen name="agreements" options={{ href: null, title: 'Rental Agreements' }} />
       <Tabs.Screen name="payments" options={{ href: null, title: 'Rent Payments' }} />
+      <Tabs.Screen name="messages" options={{ href: null, title: 'Lease Messages' }} />
+      <Tabs.Screen name="reports" options={{ href: null, title: 'Income Reports' }} />
       <Tabs.Screen name="notifications" options={{ href: null, title: 'Notifications' }} />
     </Tabs>
   );

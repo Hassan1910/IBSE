@@ -18,3 +18,12 @@ verify_jwt = false
 
 [functions.admin-delete-user]
 verify_jwt = false
+
+[functions.send-invite-email]
+verify_jwt = false
+
+[functions.scheduled-alerts]
+verify_jwt = false
+
+[functions.dispatch-push]
+verify_jwt = false

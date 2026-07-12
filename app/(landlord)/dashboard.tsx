@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useRef } from 'react';
+import React, { useCallback, useEffect, useMemo } from 'react';
 import {
   View,
   Text,
@@ -7,11 +7,10 @@ import {
   ActivityIndicator,
   RefreshControl,
   TouchableOpacity,
-  Alert,
 } from 'react-native';
 import { useFocusEffect, useRouter } from 'expo-router';
+import { useQueryClient } from '@tanstack/react-query';
 import { useUser } from '@clerk/clerk-expo';
-import { supabase } from '../../lib/supabase';
 import {
   Home,
   DoorOpen,
@@ -22,8 +21,11 @@ import {
   CreditCard,
   Wrench,
   ChevronRight,
+  MessageSquare,
 } from 'lucide-react-native';
 import NotificationBell from '../../components/NotificationBell';
+import { useLandlordDashboard } from '../../hooks/queries/useDashboard';
+import { queryKeys } from '../../hooks/queries/keys';
 
 interface RecentPayment {
   id: string;
@@ -44,149 +46,59 @@ interface RecentRequest {
 export default function LandlordDashboard() {
   const router = useRouter();
   const { user } = useUser();
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
-  const hasLoadedRef = useRef(false);
-  const [stats, setStats] = useState({
-    totalProperties: 0,
-    occupiedUnits: 0,
-    vacantUnits: 0,
-    totalTenants: 0,
-    monthlyIncome: 0,
-    verifiedCollected: 0,
-    pendingPayments: 0,
-  });
-  const [recentPayments, setRecentPayments] = useState<RecentPayment[]>([]);
-  const [recentRequests, setRecentRequests] = useState<RecentRequest[]>([]);
+  const queryClient = useQueryClient();
+  const userId = user?.id;
+  const { statsQuery, recentQuery } = useLandlordDashboard(userId);
 
-  const fetchData = useCallback(async (opts?: { silent?: boolean }) => {
-    if (!user?.id) return;
-    try {
-      if (opts?.silent) {
-        setRefreshing(true);
-      } else {
-        setLoading(true);
-      }
+  const stats = useMemo(
+    () => ({
+      totalProperties: Number(statsQuery.data?.total_properties ?? 0),
+      occupiedUnits: Number(statsQuery.data?.occupied_units ?? 0),
+      vacantUnits: Number(statsQuery.data?.vacant_units ?? 0),
+      totalTenants: Number(statsQuery.data?.total_tenants ?? 0),
+      monthlyIncome: Number(statsQuery.data?.monthly_income ?? 0),
+      verifiedCollected: Number(statsQuery.data?.verified_collected ?? 0),
+      pendingPayments: Number(statsQuery.data?.pending_payments ?? 0),
+    }),
+    [statsQuery.data]
+  );
 
-      // Scope everything through properties the landlord owns so stats stay
-      // correct even when denormalized leases/units.owner_id is stale.
-      const { data: ownedProps, error: propsError } = await supabase
-        .from('properties')
-        .select('id, status')
-        .eq('owner_id', user.id);
-      if (propsError) throw propsError;
+  const recentPayments = (recentQuery.data?.recentPayments as RecentPayment[]) || [];
+  const recentRequests = (recentQuery.data?.recentRequests as RecentRequest[]) || [];
 
-      const propIds = (ownedProps || []).map((p) => p.id);
-      const propCount = propIds.length;
+  const hasData = !!statsQuery.data || !!recentQuery.data;
+  const hasError = statsQuery.isError || recentQuery.isError;
+  const loading =
+    !userId ||
+    ((statsQuery.isLoading && !statsQuery.data) ||
+      (recentQuery.isLoading && !recentQuery.data));
+  const refreshing =
+    (statsQuery.isRefetching || recentQuery.isRefetching) &&
+    !statsQuery.isLoading &&
+    !recentQuery.isLoading;
 
-      let occupiedUnits = 0;
-      let vacantUnits = 0;
-      let totalTenants = 0;
-      let monthlyIncome = 0;
-      let verifiedCollected = 0;
-      let pendingTotal = 0;
-
-      if (propIds.length > 0) {
-        const { data: units, error: unitsError } = await supabase
-          .from('units')
-          .select('status, property_id')
-          .in('property_id', propIds);
-        if (unitsError) throw unitsError;
-
-        occupiedUnits = units?.filter((u) => u.status === 'occupied').length || 0;
-        vacantUnits = units?.filter((u) => u.status === 'vacant').length || 0;
-
-        const { data: leases, error: leasesError } = await supabase
-          .from('leases')
-          .select('id, tenant_id, rent_amount, unit_id, property_id, status')
-          .in('status', ['pending', 'active'])
-          .in('property_id', propIds);
-        if (leasesError) throw leasesError;
-
-        const activeLeases = (leases || []).filter((l) => l.status === 'active');
-        const payableLeases = leases || [];
-        totalTenants = new Set(activeLeases.map((l) => l.tenant_id)).size;
-        monthlyIncome = activeLeases.reduce((acc, l) => acc + Number(l.rent_amount || 0), 0);
-
-        // Properties without a units inventory: occupied when they have an
-        // active lease, otherwise vacant. (Vacant previously only counted
-        // unit rows, so freeing a unitless rental left Vacant at 0.)
-        const propertiesWithUnits = new Set((units || []).map((u) => u.property_id));
-        const leasedPropertyIds = new Set(activeLeases.map((l) => l.property_id));
-        const unitlessProps = (ownedProps || []).filter((p) => !propertiesWithUnits.has(p.id));
-        const unitlessOccupied = unitlessProps.filter((p) => leasedPropertyIds.has(p.id)).length;
-        const unitlessVacant = unitlessProps.length - unitlessOccupied;
-        occupiedUnits += unitlessOccupied;
-        vacantUnits += unitlessVacant;
-
-        const leaseIds = payableLeases.map((l) => l.id);
-        if (leaseIds.length > 0) {
-          const { data: pending, error: pendingError } = await supabase
-            .from('payments')
-            .select('amount')
-            .eq('status', 'pending')
-            .in('lease_id', leaseIds);
-          if (pendingError) throw pendingError;
-          pendingTotal = (pending || []).reduce((acc, p) => acc + Number(p.amount || 0), 0);
-
-          const { data: verified, error: verifiedError } = await supabase
-            .from('payments')
-            .select('amount')
-            .eq('status', 'verified')
-            .in('lease_id', leaseIds);
-          if (verifiedError) throw verifiedError;
-          verifiedCollected = (verified || []).reduce((acc, p) => acc + Number(p.amount || 0), 0);
-
-          const { data: pay, error: payError } = await supabase
-            .from('payments')
-            .select('id, amount, status, payment_date, lease_id, profiles:payer_id ( full_name )')
-            .in('lease_id', leaseIds)
-            .order('payment_date', { ascending: false })
-            .limit(5);
-          if (payError) throw payError;
-          setRecentPayments((pay as any) || []);
-        } else {
-          setRecentPayments([]);
-        }
-      } else {
-        setRecentPayments([]);
-      }
-
-      setStats({
-        totalProperties: propCount,
-        occupiedUnits,
-        vacantUnits,
-        totalTenants,
-        monthlyIncome,
-        verifiedCollected,
-        pendingPayments: pendingTotal,
-      });
-
-      const { data: reqs, error: reqsError } = await supabase
-        .from('maintenance_requests')
-        .select('id, title, status, created_at, properties!inner ( title, owner_id )')
-        .eq('properties.owner_id', user.id)
-        .order('created_at', { ascending: false })
-        .limit(5);
-      if (reqsError) throw reqsError;
-      setRecentRequests((reqs as any) || []);
-    } catch (err) {
-      console.error('Landlord dashboard fetch error:', err);
-      Alert.alert('Error', 'Failed to load dashboard data.');
-    } finally {
-      hasLoadedRef.current = true;
-      setLoading(false);
-      setRefreshing(false);
-    }
-  }, [user?.id]);
-
-  // Tab screens stay mounted, so refetch whenever this screen is focused
-  // (e.g. after adding a property on another tab).
   useFocusEffect(
     useCallback(() => {
-      fetchData({ silent: hasLoadedRef.current });
-    }, [fetchData])
+      if (!userId) return;
+      const state = queryClient.getQueryState(queryKeys.landlordDashboard(userId));
+      const age = state?.dataUpdatedAt ? Date.now() - state.dataUpdatedAt : Infinity;
+      if (age > 30_000) {
+        void queryClient.invalidateQueries({ queryKey: queryKeys.landlordDashboard(userId) });
+      }
+    }, [queryClient, userId])
   );
+
+  useEffect(() => {
+    if (!hasError) return;
+    console.error(
+      'Fetch landlord dashboard error:',
+      statsQuery.error || recentQuery.error
+    );
+  }, [hasError, statsQuery.error, recentQuery.error]);
+
+  const onRefresh = () => {
+    void Promise.all([statsQuery.refetch(), recentQuery.refetch()]);
+  };
 
   const formatPrice = (price: number) =>
     new Intl.NumberFormat('en-KE', {
@@ -212,8 +124,10 @@ export default function LandlordDashboard() {
         return '#EAB308';
       case 'in_progress':
         return '#38BDF8';
-      default:
+      case 'failed':
         return '#EF4444';
+      default:
+        return '#94A3B8';
     }
   };
 
@@ -225,11 +139,22 @@ export default function LandlordDashboard() {
     );
   }
 
+  if (hasError && !hasData) {
+    return (
+      <View style={styles.centered}>
+        <Text style={styles.errorText}>Failed to load dashboard data.</Text>
+        <TouchableOpacity style={styles.retryButton} onPress={onRefresh}>
+          <Text style={styles.retryText}>Retry</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
+
   return (
     <ScrollView
       style={styles.container}
       contentContainerStyle={styles.content}
-      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => fetchData({ silent: true })} tintColor="#38BDF8" />}
+      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#38BDF8" />}
     >
       <View style={styles.headerRow}>
         <Text style={[styles.sectionTitle, { marginBottom: 0, marginTop: 0, flex: 1 }]}>Portfolio Overview</Text>
@@ -267,7 +192,7 @@ export default function LandlordDashboard() {
         </View>
         <View style={[styles.incomeCard, styles.incomeCardGap]}>
           <CreditCard size={18} color="#38BDF8" />
-          <Text style={styles.incomeLabel}>Verified Collected</Text>
+          <Text style={styles.incomeLabel}>Collected (all time)</Text>
           <Text style={[styles.incomeValue, { color: '#38BDF8' }]}>{formatPrice(stats.verifiedCollected)}</Text>
         </View>
         <View style={styles.incomeCard}>
@@ -280,6 +205,16 @@ export default function LandlordDashboard() {
       <TouchableOpacity style={styles.linkCard} onPress={() => router.push('/(landlord)/payments')}>
         <CreditCard size={18} color="#38BDF8" style={styles.linkIcon} />
         <Text style={styles.linkText}>View & verify rent payments</Text>
+        <ChevronRight size={18} color="#94A3B8" />
+      </TouchableOpacity>
+      <TouchableOpacity style={styles.linkCard} onPress={() => router.push('/(landlord)/reports')}>
+        <Wallet size={18} color="#38BDF8" style={styles.linkIcon} />
+        <Text style={styles.linkText}>Income & occupancy reports</Text>
+        <ChevronRight size={18} color="#94A3B8" />
+      </TouchableOpacity>
+      <TouchableOpacity style={styles.linkCard} onPress={() => router.push('/(landlord)/messages')}>
+        <MessageSquare size={18} color="#38BDF8" style={styles.linkIcon} />
+        <Text style={styles.linkText}>Message tenants</Text>
         <ChevronRight size={18} color="#94A3B8" />
       </TouchableOpacity>
       <TouchableOpacity style={styles.linkCard} onPress={() => router.push('/(landlord)/agreements')}>
@@ -352,6 +287,24 @@ const styles = StyleSheet.create({
     backgroundColor: '#0F172A',
     justifyContent: 'center',
     alignItems: 'center',
+    paddingHorizontal: 24,
+  },
+  errorText: {
+    color: '#F8FAFC',
+    fontSize: 15,
+    textAlign: 'center',
+    marginBottom: 16,
+  },
+  retryButton: {
+    backgroundColor: '#38BDF8',
+    paddingHorizontal: 20,
+    paddingVertical: 10,
+    borderRadius: 8,
+  },
+  retryText: {
+    color: '#0F172A',
+    fontWeight: '600',
+    fontSize: 14,
   },
   sectionTitle: {
     fontSize: 16,

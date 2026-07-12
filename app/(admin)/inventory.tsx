@@ -11,8 +11,13 @@ import {
   Alert,
 } from 'react-native';
 import { supabase } from '../../lib/supabase';
+import { useQueryClient } from '@tanstack/react-query';
 import { getLowStockThreshold } from '../../lib/settings';
 import { Plus, Minus, X, Package, Edit2, Trash2, History } from 'lucide-react-native';
+import { useInfiniteList } from '../../hooks/queries/useInfiniteList';
+import { fetchInventoryPage } from '../../hooks/queries/fetchers';
+import { queryKeys } from '../../hooks/queries/keys';
+import { LIST_PERF, PAGE_SIZE } from '../../lib/queryClient';
 
 interface InventoryItem {
   id: string;
@@ -32,8 +37,20 @@ interface UsageRecord {
 }
 
 export default function AdminInventoryScreen() {
-  const [inventory, setInventory] = useState<InventoryItem[]>([]);
-  const [loading, setLoading] = useState(true);
+  const queryClient = useQueryClient();
+  const {
+    items: inventory,
+    loading,
+    refreshing,
+    loadingMore,
+    error,
+    refresh,
+    loadMore,
+  } = useInfiniteList<InventoryItem>(
+    queryKeys.adminInventory,
+    (page) => fetchInventoryPage(page) as Promise<InventoryItem[]>,
+    PAGE_SIZE.tables
+  );
 
   // Add Item Modal States
   const [modalVisible, setModalVisible] = useState(false);
@@ -47,6 +64,16 @@ export default function AdminInventoryScreen() {
   const [historyItem, setHistoryItem] = useState<InventoryItem | null>(null);
   const [usages, setUsages] = useState<UsageRecord[]>([]);
   const [loadingUsages, setLoadingUsages] = useState(false);
+
+  const invalidateInventory = () =>
+    queryClient.invalidateQueries({ queryKey: queryKeys.adminInventory });
+
+  useEffect(() => {
+    if (error) {
+      console.error('Fetch inventory error:', error);
+      Alert.alert('Error', 'Failed to retrieve inventory items.');
+    }
+  }, [error]);
 
   const resetForm = () => {
     setEditingId(null);
@@ -66,21 +93,21 @@ export default function AdminInventoryScreen() {
   const handleDelete = (id: string) => {
     Alert.alert('Delete Item', 'Are you sure you want to delete this inventory item?', [
       { text: 'Cancel', style: 'cancel' },
-      { 
-        text: 'Delete', 
-        style: 'destructive', 
+      {
+        text: 'Delete',
+        style: 'destructive',
         onPress: async () => {
           try {
-            const { error } = await supabase.from('inventory').delete().eq('id', id);
-            if (error) throw error;
+            const { error: delError } = await supabase.from('inventory').delete().eq('id', id);
+            if (delError) throw delError;
             Alert.alert('Success', 'Item deleted.');
-            setInventory(prev => prev.filter(i => i.id !== id));
+            await invalidateInventory();
           } catch (err) {
             console.error('Delete item error:', err);
             Alert.alert('Error', 'Failed to delete item.');
           }
-        }
-      }
+        },
+      },
     ]);
   };
 
@@ -88,13 +115,13 @@ export default function AdminInventoryScreen() {
     setHistoryItem(item);
     try {
       setLoadingUsages(true);
-      const { data, error } = await supabase
+      const { data, error: usageError } = await supabase
         .from('inventory_usages')
         .select('id, quantity_used, notes, created_at, maintenance_requests ( title ), profiles:used_by ( full_name )')
         .eq('inventory_id', item.id)
         .order('created_at', { ascending: false })
         .limit(50);
-      if (error) throw error;
+      if (usageError) throw usageError;
       setUsages((data as any) || []);
     } catch (err) {
       console.error('Fetch usage history error:', err);
@@ -103,28 +130,6 @@ export default function AdminInventoryScreen() {
       setLoadingUsages(false);
     }
   };
-
-  const fetchInventory = async () => {
-    try {
-      setLoading(true);
-      const { data, error } = await supabase
-        .from('inventory')
-        .select('*')
-        .order('item_name', { ascending: true });
-
-      if (error) throw error;
-      setInventory(data || []);
-    } catch (err: any) {
-      console.error('Fetch inventory error:', err);
-      Alert.alert('Error', 'Failed to retrieve inventory items.');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    fetchInventory();
-  }, []);
 
   const stockStatusForQty = async (qty: number) => {
     const threshold = await getLowStockThreshold();
@@ -138,19 +143,13 @@ export default function AdminInventoryScreen() {
     const nextStatus = await stockStatusForQty(nextQty);
 
     try {
-      const { error } = await supabase
+      const { error: updateError } = await supabase
         .from('inventory')
         .update({ quantity: nextQty, status: nextStatus, updated_at: new Date().toISOString() })
         .eq('id', id);
 
-      if (error) throw error;
-
-      // Update state locally
-      setInventory((prev) =>
-        prev.map((item) =>
-          item.id === id ? { ...item, quantity: nextQty, status: nextStatus } : item
-        )
-      );
+      if (updateError) throw updateError;
+      await invalidateInventory();
     } catch (err: any) {
       console.error('Update quantity error:', err);
       Alert.alert('Error', 'Failed to update stock quantity.');
@@ -173,35 +172,36 @@ export default function AdminInventoryScreen() {
 
     try {
       setSubmitting(true);
-      
+
       if (editingId) {
-        const { error } = await supabase.from('inventory')
+        const { error: updateError } = await supabase
+          .from('inventory')
           .update({
             item_name: itemName.trim(),
             quantity: numQty,
             unit: unit.trim() || 'pcs',
             status: nextStatus,
-            updated_at: new Date().toISOString()
+            updated_at: new Date().toISOString(),
           })
           .eq('id', editingId);
 
-        if (error) throw error;
+        if (updateError) throw updateError;
         Alert.alert('Success 🎉', 'Inventory item updated.');
       } else {
-        const { error } = await supabase.from('inventory').insert({
+        const { error: insertError } = await supabase.from('inventory').insert({
           item_name: itemName.trim(),
           quantity: numQty,
           unit: unit.trim() || 'pcs',
           status: nextStatus,
         });
 
-        if (error) throw error;
+        if (insertError) throw insertError;
         Alert.alert('Success 🎉', 'Inventory item added.');
       }
 
       setModalVisible(false);
       resetForm();
-      fetchInventory();
+      await invalidateInventory();
     } catch (err: any) {
       console.error('Save inventory item error:', err);
       Alert.alert('Error', 'Failed to save inventory item.');
@@ -218,7 +218,7 @@ export default function AdminInventoryScreen() {
 
   return (
     <View style={styles.container}>
-      {loading ? (
+      {loading && inventory.length === 0 ? (
         <View style={styles.centered}>
           <ActivityIndicator size="large" color="#38BDF8" />
         </View>
@@ -227,6 +227,7 @@ export default function AdminInventoryScreen() {
           <FlatList
             data={inventory}
             keyExtractor={(item) => item.id}
+            {...LIST_PERF}
             renderItem={({ item }) => (
               <View style={styles.card}>
                 <View style={styles.cardInfo}>
@@ -234,10 +235,9 @@ export default function AdminInventoryScreen() {
                   <Text style={styles.subText}>
                     Stock: {item.quantity} {item.unit}
                   </Text>
-                  <View style={[
-                    styles.statusLabel,
-                    { backgroundColor: `${getStatusColor(item.status)}15` }
-                  ]}>
+                  <View
+                    style={[styles.statusLabel, { backgroundColor: `${getStatusColor(item.status)}15` }]}
+                  >
                     <Text style={[styles.statusText, { color: getStatusColor(item.status) }]}>
                       {item.status.replace('_', ' ').toUpperCase()}
                     </Text>
@@ -251,7 +251,10 @@ export default function AdminInventoryScreen() {
                   <TouchableOpacity style={styles.actionBtn} onPress={() => handleEdit(item)}>
                     <Edit2 size={16} color="#38BDF8" />
                   </TouchableOpacity>
-                  <TouchableOpacity style={[styles.actionBtn, styles.deleteBtn]} onPress={() => handleDelete(item.id)}>
+                  <TouchableOpacity
+                    style={[styles.actionBtn, styles.deleteBtn]}
+                    onPress={() => handleDelete(item.id)}
+                  >
                     <Trash2 size={16} color="#EF4444" />
                   </TouchableOpacity>
                   <TouchableOpacity
@@ -270,8 +273,17 @@ export default function AdminInventoryScreen() {
               </View>
             )}
             contentContainerStyle={styles.listContainer}
-            onRefresh={fetchInventory}
-            refreshing={loading}
+            onRefresh={refresh}
+            refreshing={refreshing}
+            onEndReached={loadMore}
+            onEndReachedThreshold={0.4}
+            ListFooterComponent={
+              loadingMore ? (
+                <View style={styles.loadingMore}>
+                  <ActivityIndicator color="#38BDF8" />
+                </View>
+              ) : null
+            }
             ListEmptyComponent={
               <View style={styles.emptyCentered}>
                 <Package size={48} color="#94A3B8" style={styles.emptyIcon} />
@@ -280,8 +292,8 @@ export default function AdminInventoryScreen() {
             }
           />
 
-          <TouchableOpacity 
-            style={styles.fab} 
+          <TouchableOpacity
+            style={styles.fab}
             onPress={() => {
               resetForm();
               setModalVisible(true);
@@ -302,7 +314,9 @@ export default function AdminInventoryScreen() {
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
             <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>{editingId ? 'Edit Inventory Item' : 'Track New Inventory Item'}</Text>
+              <Text style={styles.modalTitle}>
+                {editingId ? 'Edit Inventory Item' : 'Track New Inventory Item'}
+              </Text>
               <TouchableOpacity onPress={() => setModalVisible(false)}>
                 <X size={24} color="#94A3B8" />
               </TouchableOpacity>
@@ -343,11 +357,7 @@ export default function AdminInventoryScreen() {
                 />
               </View>
 
-              <TouchableOpacity
-                style={styles.submitBtn}
-                onPress={handleSubmit}
-                disabled={submitting}
-              >
+              <TouchableOpacity style={styles.submitBtn} onPress={handleSubmit} disabled={submitting}>
                 {submitting ? (
                   <ActivityIndicator color="#0F172A" />
                 ) : (
@@ -426,6 +436,10 @@ const styles = StyleSheet.create({
   listContainer: {
     padding: 16,
     flexGrow: 1,
+  },
+  loadingMore: {
+    paddingVertical: 16,
+    alignItems: 'center',
   },
   card: {
     backgroundColor: '#1E293B',

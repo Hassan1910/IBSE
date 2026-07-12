@@ -1,12 +1,16 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { ActivityIndicator, Alert, FlatList, Image, Modal, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
-import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
+import React, { useEffect, useMemo, useState } from 'react';
+import { ActivityIndicator, Alert, FlatList, Modal, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { Image } from 'expo-image';
+import { useLocalSearchParams, useRouter } from 'expo-router';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { supabase } from '../../lib/supabase';
 import { useUser } from '@clerk/clerk-expo';
 import { pickImages, uploadImage, type PickedImage } from '../../lib/storage';
 import { notifyPropertyOwner } from '../../lib/notifications';
 import { useAudit } from '../../hooks/useAudit';
 import { Camera, CheckCircle, ClipboardList, Clock, DollarSign, HelpCircle, Plus, Wrench, X } from 'lucide-react-native';
+import { fetchTenantMaintenance } from '../../hooks/queries/fetchers';
+import { queryKeys } from '../../hooks/queries/keys';
 
 function newRequestId() {
   const c = globalThis.crypto as Crypto | undefined;
@@ -38,10 +42,20 @@ export default function TenantMaintenanceScreen() {
   const { user } = useUser();
   const { log } = useAudit();
   const router = useRouter();
+  const queryClient = useQueryClient();
   const { id: focusId } = useLocalSearchParams<{ id?: string }>();
-  const [requests, setRequests] = useState<MaintenanceRequest[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [lease, setLease] = useState<any>(null);
+  const userId = user?.id || '';
+
+  const maintenanceQuery = useQuery({
+    queryKey: queryKeys.tenantMaintenance(userId),
+    queryFn: () => fetchTenantMaintenance(userId),
+    enabled: !!userId,
+  });
+
+  const requests = (maintenanceQuery.data?.requests as any as MaintenanceRequest[]) || [];
+  const lease = (maintenanceQuery.data?.lease as any) ?? null;
+  const loading = maintenanceQuery.isLoading && !maintenanceQuery.data;
+  const refreshing = maintenanceQuery.isRefetching && !maintenanceQuery.isLoading;
 
   // New Request Form States
   const [modalVisible, setModalVisible] = useState(false);
@@ -54,62 +68,55 @@ export default function TenantMaintenanceScreen() {
   const [submitting, setSubmitting] = useState(false);
   const [confirming, setConfirming] = useState(false);
 
-  // Fetch tenant's active lease and historical requests
-  const fetchData = async () => {
-    if (!user) return;
-    try {
-      setLoading(true);
-
-      // Fetch active lease to know which property to assign ticket to
-      const { data: leaseData, error: leaseError } = await supabase
-        .from('leases')
-        .select('property_id, properties(title)')
-        .eq('tenant_id', user.id)
-        .eq('status', 'active')
-        .order('start_date', { ascending: false })
-        .limit(1)
-        .maybeSingle();
-
-      if (leaseError) throw leaseError;
-
-      setLease(leaseData);
-
-      // Fetch tickets
-      const { data: tickets, error } = await supabase
-        .from('maintenance_requests')
-        .select('id, title, description, priority, status, image_urls, tenant_confirmed_at, assigned_to, expense_amount, created_at, properties ( title )')
-        .eq('tenant_id', user.id)
-        .order('created_at', { ascending: false });
-
-      if (error) throw error;
-      setRequests((tickets as any) || []);
-    } catch (err: any) {
-      console.error('Fetch tickets error:', err);
-      Alert.alert('Error', 'Failed to load maintenance tickets.');
-    } finally {
-      setLoading(false);
-    }
-  };
-
   useEffect(() => {
-    fetchData();
-  }, [user]);
-
-  useFocusEffect(
-    useCallback(() => {
-      if (user?.id) fetchData();
-    }, [user?.id]),
-  );
+    if (maintenanceQuery.isError) {
+      console.error('Fetch tickets error:', maintenanceQuery.error);
+      Alert.alert('Error', 'Failed to load maintenance tickets.');
+    }
+  }, [maintenanceQuery.isError, maintenanceQuery.error]);
 
   // Open the specific ticket when arriving from a notification deep link.
   useEffect(() => {
-    if (!focusId || loading) return;
-    const match = requests.find((r) => r.id === focusId);
-    if (!match) return;
-    setDetailItem(match);
-    setDetailVisible(true);
-    router.setParams({ id: undefined });
-  }, [focusId, loading, requests, router]);
+    if (!focusId || loading || !userId) return;
+
+    const openFocusedTicket = async () => {
+      const match = requests.find((r) => r.id === focusId);
+      if (match) {
+        setDetailItem(match);
+        setDetailVisible(true);
+        router.setParams({ id: undefined });
+        return;
+      }
+
+      try {
+        const { data, error } = await supabase
+          .from('maintenance_requests')
+          .select(
+            'id, title, description, priority, status, image_urls, tenant_confirmed_at, assigned_to, expense_amount, created_at, properties ( title )'
+          )
+          .eq('id', focusId)
+          .eq('tenant_id', userId)
+          .maybeSingle();
+        if (error) throw error;
+        if (data) {
+          setDetailItem(data as any as MaintenanceRequest);
+          setDetailVisible(true);
+        } else {
+          Alert.alert('Not Found', 'That maintenance ticket could not be found.');
+        }
+      } catch (err) {
+        console.error('Load focused maintenance ticket error:', err);
+        Alert.alert('Error', 'Failed to open that maintenance ticket.');
+      } finally {
+        router.setParams({ id: undefined });
+      }
+    };
+
+    void openFocusedTicket();
+  }, [focusId, loading, requests, router, userId]);
+
+  const invalidate = () =>
+    queryClient.invalidateQueries({ queryKey: queryKeys.tenantMaintenance(userId) });
 
   const handlePickImages = async () => {
     try {
@@ -134,7 +141,7 @@ export default function TenantMaintenanceScreen() {
   const handleSubmit = async () => {
     if (!user) return;
     if (!lease) {
-      Alert.alert('Lease Required', 'You must have an active lease to file a maintenance ticket.');
+      Alert.alert('Lease Required', 'You must have a pending or active lease to file a maintenance ticket.');
       return;
     }
     if (!title.trim() || !description.trim()) {
@@ -187,7 +194,7 @@ export default function TenantMaintenanceScreen() {
       setTitle('');
       setDescription('');
       setSelectedImages([]);
-      fetchData(); // reload lists
+      await invalidate();
     } catch (err: any) {
       console.error('Submit ticket error:', err);
       Alert.alert('Error', err?.message || 'Failed to submit maintenance request.');
@@ -262,7 +269,7 @@ export default function TenantMaintenanceScreen() {
       });
 
       setDetailVisible(false);
-      fetchData();
+      await invalidate();
       Alert.alert('Confirmed', 'Repair has been marked as confirmed.');
     } catch (err) {
       console.error('Confirm repair error:', err);
@@ -311,7 +318,7 @@ export default function TenantMaintenanceScreen() {
                 {photoUrls(item).length > 0 ? (
                   <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.cardImageRow}>
                     {photoUrls(item).map((uri) => (
-                      <Image key={uri} source={{ uri }} style={styles.cardImage} />
+                      <Image key={uri} source={{ uri }} style={styles.cardImage} contentFit="cover" />
                     ))}
                   </ScrollView>
                 ) : null}
@@ -341,8 +348,8 @@ export default function TenantMaintenanceScreen() {
               </TouchableOpacity>
             )}
             contentContainerStyle={styles.listContainer}
-            onRefresh={fetchData}
-            refreshing={loading}
+            onRefresh={() => maintenanceQuery.refetch()}
+            refreshing={refreshing}
             ListEmptyComponent={
               <View style={styles.emptyCentered}>
                 <Wrench size={40} color="#94A3B8" style={styles.emptyIcon} />
@@ -438,7 +445,7 @@ export default function TenantMaintenanceScreen() {
                 {selectedImages.length > 0 ? (
                   <View style={styles.imagePreviewRow}>
                     {selectedImages.map((img) => (
-                      <Image key={img.uri} source={{ uri: img.uri }} style={styles.previewImage} />
+                      <Image key={img.uri} source={{ uri: img.uri }} style={styles.previewImage} contentFit="cover" />
                     ))}
                   </View>
                 ) : null}
@@ -488,7 +495,7 @@ export default function TenantMaintenanceScreen() {
                 {photoUrls(detailItem).length > 0 ? (
                   <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.detailImageRow}>
                     {photoUrls(detailItem).map((uri) => (
-                      <Image key={uri} source={{ uri }} style={styles.detailImage} />
+                      <Image key={uri} source={{ uri }} style={styles.detailImage} contentFit="cover" />
                     ))}
                   </ScrollView>
                 ) : (

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
   View,
   Text,
@@ -6,13 +6,15 @@ import {
   StyleSheet,
   TouchableOpacity,
   Alert,
-  Image,
   ScrollView,
+  Linking,
 } from 'react-native';
+import { Image } from 'expo-image';
 import { supabase } from '../../lib/supabase';
 import { useUser } from '@clerk/clerk-expo';
 import { useRole } from '../../hooks/useRole';
 import { notifyUser } from '../../lib/notifications';
+import { generateAndAttachReceipt } from '../../lib/receipts';
 import MaterialsUsedModal from '../../components/MaterialsUsedModal';
 import NotificationBell from '../../components/NotificationBell';
 import StatCard from '../../components/admin/StatCard';
@@ -25,6 +27,13 @@ import QueueCard, {
 import DashboardSkeleton from '../../components/admin/DashboardSkeleton';
 import { adminTheme } from '../../constants/adminTheme';
 import { useLocalSearchParams, useRouter } from 'expo-router';
+import { useQueryClient } from '@tanstack/react-query';
+import {
+  useAdminDashboardQueues,
+  useAdminDashboardStats,
+} from '../../hooks/queries/useDashboard';
+import { queryKeys } from '../../hooks/queries/keys';
+import { LIST_PERF } from '../../lib/queryClient';
 import {
   CreditCard,
   User,
@@ -35,11 +44,14 @@ import {
   MessageSquare,
   Clock,
   CheckCircle,
+  CheckCheck,
   FileText,
   Package,
   Wallet,
   FileText as LeaseIcon,
+  FilePlus,
 } from 'lucide-react-native';
+import ConvertBookingToLeaseModal from '../../components/ConvertBookingToLeaseModal';
 
 function getGreeting(): string {
   const hour = new Date().getHours();
@@ -51,22 +63,46 @@ function getGreeting(): string {
 function getPriorityColors(p: string) {
   switch (p) {
     case 'high':
-      return { bg: 'rgba(239, 68, 68, 0.15)', border: adminTheme.colors.danger, text: adminTheme.colors.danger };
+      return {
+        backgroundColor: 'rgba(239, 68, 68, 0.15)',
+        borderColor: adminTheme.colors.danger,
+        textColor: adminTheme.colors.danger,
+      };
     case 'medium':
-      return { bg: 'rgba(234, 179, 8, 0.15)', border: adminTheme.colors.warning, text: adminTheme.colors.warning };
+      return {
+        backgroundColor: 'rgba(234, 179, 8, 0.15)',
+        borderColor: adminTheme.colors.warning,
+        textColor: adminTheme.colors.warning,
+      };
     default:
-      return { bg: 'rgba(16, 185, 129, 0.15)', border: adminTheme.colors.success, text: adminTheme.colors.success };
+      return {
+        backgroundColor: 'rgba(16, 185, 129, 0.15)',
+        borderColor: adminTheme.colors.success,
+        textColor: adminTheme.colors.success,
+      };
   }
 }
 
 function getFeedbackBadgeColors(type: string) {
   switch (type) {
     case 'complaint':
-      return { bg: 'rgba(239, 68, 68, 0.15)', border: adminTheme.colors.danger, text: adminTheme.colors.danger };
+      return {
+        backgroundColor: 'rgba(239, 68, 68, 0.15)',
+        borderColor: adminTheme.colors.danger,
+        textColor: adminTheme.colors.danger,
+      };
     case 'suggestion':
-      return { bg: adminTheme.colors.accentMuted, border: adminTheme.colors.accent, text: adminTheme.colors.accent };
+      return {
+        backgroundColor: adminTheme.colors.accentMuted,
+        borderColor: adminTheme.colors.accent,
+        textColor: adminTheme.colors.accent,
+      };
     default:
-      return { bg: 'rgba(234, 179, 8, 0.15)', border: adminTheme.colors.warning, text: adminTheme.colors.warning };
+      return {
+        backgroundColor: 'rgba(234, 179, 8, 0.15)',
+        borderColor: adminTheme.colors.warning,
+        textColor: adminTheme.colors.warning,
+      };
   }
 }
 
@@ -78,6 +114,8 @@ interface Payment {
   reference_code: string;
   payment_date: string;
   status: 'pending' | 'verified' | 'failed';
+  proof_url?: string | null;
+  receipt_url?: string | null;
   profiles: {
     full_name: string;
     email: string;
@@ -92,13 +130,17 @@ interface Payment {
 interface Booking {
   id: string;
   client_id: string;
+  property_id: string;
   booking_date: string;
-  type: 'viewing' | 'reservation';
-  status: 'pending' | 'approved' | 'declined';
+  type: 'viewing';
+  status: 'pending' | 'approved' | 'declined' | 'completed' | 'cancelled';
   notes: string;
   properties: {
     title: string;
     location: string;
+    type?: 'rental' | 'sale';
+    owner_id?: string | null;
+    price?: number;
   };
   profiles: {
     full_name: string;
@@ -141,161 +183,54 @@ export default function AdminDashboard() {
   const { user } = useUser();
   const { role, loading: roleLoading } = useRole();
   const router = useRouter();
+  const queryClient = useQueryClient();
   const { tab: tabParam, id: focusId } = useLocalSearchParams<{ tab?: string; id?: string }>();
   // Finance staff only handle payment verification; operational queues
   // (bookings, maintenance, feedback) are hidden from them.
   const isFinance = role === 'finance';
-  const availableTabs: DashboardTab[] = isFinance
-    ? ['payments']
-    : ['payments', 'bookings', 'maintenance', 'feedback'];
+  const availableTabs: DashboardTab[] = useMemo(
+    () => (isFinance ? ['payments'] : ['payments', 'bookings', 'maintenance', 'feedback']),
+    [isFinance]
+  );
 
   const [activeTab, setActiveTab] = useState<DashboardTab>('payments');
-  const [payments, setPayments] = useState<Payment[]>([]);
-  const [bookings, setBookings] = useState<Booking[]>([]);
-  const [maintenanceRequests, setMaintenanceRequests] = useState<MaintenanceRequest[]>([]);
-  const [feedback, setFeedback] = useState<Feedback[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [stats, setStats] = useState({ totalRevenue: 0, activeLeases: 0, pendingBookings: 0, openMaintenance: 0 });
   const [materialsRequest, setMaterialsRequest] = useState<MaintenanceRequest | null>(null);
   const [highlightedId, setHighlightedId] = useState<string | null>(null);
+  const [convertBooking, setConvertBooking] = useState<Booking | null>(null);
+  const listRef = useRef<FlatList>(null);
 
-  const fetchDashboardData = async () => {
-    try {
-      setLoading(true);
-      
-      // 1. Fetch pending payments
-      const { data: payData, error: payError } = await supabase
-        .from('payments')
-        .select(`
-          id,
-          payer_id,
-          amount,
-          payment_method,
-          reference_code,
-          payment_date,
-          status,
-          profiles ( full_name, email ),
-          leases (
-            properties ( title )
-          )
-        `)
-        .eq('status', 'pending')
-        .order('payment_date', { ascending: true });
+  const roleReady = !roleLoading && !!role;
+  const statsQuery = useAdminDashboardStats(roleReady);
+  const queuesQuery = useAdminDashboardQueues(!isFinance, roleReady);
 
-      if (payError) throw payError;
-      setPayments((payData as any) || []);
+  const payments = (queuesQuery.data?.payments as unknown as Payment[]) || [];
+  const bookings = (queuesQuery.data?.bookings as unknown as Booking[]) || [];
+  const maintenanceRequests = (queuesQuery.data?.maintenance as unknown as MaintenanceRequest[]) || [];
+  const feedback = (queuesQuery.data?.feedback as unknown as Feedback[]) || [];
+  const loading = roleLoading || (statsQuery.isLoading && !statsQuery.data) || (queuesQuery.isLoading && !queuesQuery.data);
 
-      let maintData: any[] | null = null;
+  const stats = useMemo(
+    () => ({
+      totalRevenue: Number(statsQuery.data?.total_revenue ?? 0),
+      activeLeases: Number(statsQuery.data?.active_leases ?? 0),
+      pendingBookings: Number(statsQuery.data?.pending_bookings ?? 0),
+      openMaintenance: Number(statsQuery.data?.open_maintenance ?? 0),
+    }),
+    [statsQuery.data]
+  );
 
-      // Operational queues (bookings, maintenance, feedback) are only relevant
-      // to admins. Finance staff skip these queries entirely.
-      if (!isFinance) {
-        // 2. Fetch pending bookings
-        const { data: bookData, error: bookError } = await supabase
-          .from('bookings')
-          .select(`
-            id,
-            client_id,
-            booking_date,
-            type,
-            status,
-            notes,
-            properties ( title, location ),
-            profiles ( full_name, email, phone )
-          `)
-          .eq('status', 'pending')
-          .order('booking_date', { ascending: true });
-
-        if (bookError) throw bookError;
-        setBookings((bookData as any) || []);
-
-        // 3. Fetch active maintenance requests
-        const { data: maintResult, error: maintError } = await supabase
-          .from('maintenance_requests')
-          .select(`
-            id,
-            tenant_id,
-            title,
-            description,
-            priority,
-            status,
-            created_at,
-            image_urls,
-            properties ( title ),
-            profiles ( full_name )
-          `)
-          .neq('status', 'resolved')
-          .order('created_at', { ascending: false });
-
-        if (maintError) throw maintError;
-        maintData = maintResult;
-        setMaintenanceRequests((maintResult as any) || []);
-
-        // 4. Fetch feedback
-        const { data: feedData, error: feedError } = await supabase
-          .from('feedback')
-          .select(`
-            id,
-            type,
-            message,
-            created_at,
-            profiles!feedback_user_id_fkey ( full_name, email )
-          `)
-          .order('created_at', { ascending: false });
-
-        if (feedError) throw feedError;
-        setFeedback((feedData as any) || []);
-      }
-
-      // 5. Fetch sum of verified payments
-      const { data: verifiedPays } = await supabase
-        .from('payments')
-        .select('amount')
-        .eq('status', 'verified');
-      
-      const sum = verifiedPays ? verifiedPays.reduce((acc, curr) => acc + Number(curr.amount), 0) : 0;
-
-      // 6. Fetch count of active leases
-      const { count: leaseCount } = await supabase
-        .from('leases')
-        .select('*', { count: 'exact', head: true })
-        .eq('status', 'active');
-
-      let bookingCount = 0;
-      let openMaintCount = 0;
-
-      if (!isFinance) {
-        // 7. Fetch count of pending bookings
-        const { count: bookCount } = await supabase
-          .from('bookings')
-          .select('*', { count: 'exact', head: true })
-          .eq('status', 'pending');
-
-        bookingCount = bookCount || 0;
-        openMaintCount = maintData ? maintData.length : 0;
-      }
-
-      setStats({
-        totalRevenue: sum,
-        activeLeases: leaseCount || 0,
-        pendingBookings: bookingCount,
-        openMaintenance: openMaintCount,
-      });
-
-    } catch (err: any) {
-      console.error('Fetch dashboard data error:', err);
-      Alert.alert('Error', 'Failed to load dashboard statistics.');
-    } finally {
-      setLoading(false);
-    }
-  };
+  const fetchDashboardData = useCallback(async () => {
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: queryKeys.adminDashboardStats }),
+      queryClient.invalidateQueries({ queryKey: queryKeys.adminDashboardQueues }),
+    ]);
+  }, [queryClient]);
 
   useEffect(() => {
-    // Wait until the role is known so finance vs admin queries run correctly.
-    if (roleLoading) return;
-    fetchDashboardData();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [roleLoading, isFinance]);
+    if (statsQuery.isError || queuesQuery.isError) {
+      Alert.alert('Error', 'Failed to load dashboard statistics.');
+    }
+  }, [statsQuery.isError, queuesQuery.isError]);
 
   // Keep the active tab valid if the role restricts the available tabs.
   useEffect(() => {
@@ -305,7 +240,7 @@ export default function AdminDashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isFinance]);
 
-  // Deep-link from notifications: switch tab and highlight the entity.
+  // Deep-link from notifications: switch tab, highlight, and scroll into view.
   useEffect(() => {
     if (tabParam && availableTabs.includes(tabParam as DashboardTab)) {
       setActiveTab(tabParam as DashboardTab);
@@ -314,7 +249,38 @@ export default function AdminDashboard() {
       setHighlightedId(focusId);
       router.setParams({ id: undefined, tab: undefined });
     }
-  }, [tabParam, focusId, router]);
+  }, [tabParam, focusId, router, availableTabs]);
+
+  useEffect(() => {
+    if (!highlightedId || loading) return;
+    const data = (() => {
+      switch (activeTab) {
+        case 'payments':
+          return payments;
+        case 'bookings':
+          return bookings;
+        case 'maintenance':
+          return maintenanceRequests;
+        case 'feedback':
+          return feedback;
+        default:
+          return [];
+      }
+    })();
+    const index = data.findIndex((item) => item.id === highlightedId);
+    if (index < 0) return;
+    requestAnimationFrame(() => {
+      listRef.current?.scrollToIndex({ index, animated: true, viewPosition: 0.1 });
+    });
+  }, [
+    highlightedId,
+    loading,
+    activeTab,
+    payments,
+    bookings,
+    maintenanceRequests,
+    feedback,
+  ]);
 
   const handleVerifyPayment = async (id: string, action: 'verified' | 'failed') => {
     try {
@@ -326,13 +292,24 @@ export default function AdminDashboard() {
 
       if (error) throw error;
 
+      if (action === 'verified' && current) {
+        await generateAndAttachReceipt({
+          id: current.id,
+          amount: current.amount,
+          payment_method: current.payment_method,
+          reference_code: current.reference_code,
+          payment_date: current.payment_date,
+          payer_name: current.profiles?.full_name,
+          property_title: current.leases?.properties?.title,
+        });
+      }
+
       Alert.alert(
         'Success',
         action === 'verified'
           ? 'Payment verified. If this was the first payment on a pending lease, the lease is now active.'
           : 'Payment reference marked as Failed.'
       );
-      setPayments((prev) => prev.filter((p) => p.id !== id));
       if (current) {
         await notifyUser({
           userId: current.payer_id,
@@ -354,7 +331,10 @@ export default function AdminDashboard() {
     }
   };
 
-  const handleVerifyBooking = async (id: string, action: 'approved' | 'declined') => {
+  const handleVerifyBooking = async (
+    id: string,
+    action: 'approved' | 'declined' | 'completed' | 'cancelled'
+  ) => {
     try {
       const current = bookings.find((b) => b.id === id);
       const { error } = await supabase
@@ -364,17 +344,31 @@ export default function AdminDashboard() {
 
       if (error) throw error;
 
-      Alert.alert('Success', `Booking request marked as ${action.toUpperCase()}.`);
-      setBookings((prev) => prev.filter((b) => b.id !== id));
+      const labels: Record<typeof action, string> = {
+        approved: 'APPROVED',
+        declined: 'DECLINED',
+        completed: 'COMPLETED',
+        cancelled: 'CANCELLED',
+      };
+      Alert.alert('Success', `Booking request marked as ${labels[action]}.`);
       if (current?.client_id) {
+        const titles: Record<typeof action, string> = {
+          approved: 'Booking Approved',
+          declined: 'Booking Declined',
+          completed: 'Viewing Completed',
+          cancelled: 'Booking Cancelled',
+        };
+        const bodies: Record<typeof action, string> = {
+          approved: `Your ${current.type} request for ${current.properties?.title || 'a property'} was approved.`,
+          declined: `Your ${current.type} request for ${current.properties?.title || 'a property'} was declined.`,
+          completed: `Your ${current.type} for ${current.properties?.title || 'a property'} was marked completed.`,
+          cancelled: `Your ${current.type} for ${current.properties?.title || 'a property'} was cancelled by staff.`,
+        };
         await notifyUser({
           userId: current.client_id,
           type: 'booking_update',
-          title: action === 'approved' ? 'Booking Approved' : 'Booking Declined',
-          body:
-            action === 'approved'
-              ? `Your ${current.type} request for ${current.properties?.title || 'a property'} was approved.`
-              : `Your ${current.type} request for ${current.properties?.title || 'a property'} was declined.`,
+          title: titles[action],
+          body: bodies[action],
           entityType: 'booking',
           entityId: current.id,
         });
@@ -397,13 +391,6 @@ export default function AdminDashboard() {
       if (error) throw error;
 
       Alert.alert('Success', `Maintenance status updated to ${nextStatus.replace('_', ' ').toUpperCase()}.`);
-      if (nextStatus === 'resolved') {
-        setMaintenanceRequests((prev) => prev.filter((m) => m.id !== id));
-      } else {
-        setMaintenanceRequests((prev) =>
-          prev.map((m) => (m.id === id ? { ...m, status: nextStatus } : m))
-        );
-      }
       if (current) {
         await notifyUser({
           userId: current.tenant_id,
@@ -421,21 +408,25 @@ export default function AdminDashboard() {
     }
   };
 
-  const handleDeleteFeedback = async (id: string) => {
-    try {
-      const { error } = await supabase
-        .from('feedback')
-        .delete()
-        .eq('id', id);
-
-      if (error) throw error;
-
-      Alert.alert('Success', 'Feedback record deleted.');
-      setFeedback((prev) => prev.filter((f) => f.id !== id));
-    } catch (err: any) {
-      console.error('Delete feedback error:', err);
-      Alert.alert('Error', 'Failed to delete feedback record.');
-    }
+  const handleDeleteFeedback = (id: string) => {
+    Alert.alert('Dismiss Feedback', 'Delete this feedback record? This cannot be undone.', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Delete',
+        style: 'destructive',
+        onPress: async () => {
+          try {
+            const { error } = await supabase.from('feedback').delete().eq('id', id);
+            if (error) throw error;
+            Alert.alert('Success', 'Feedback record deleted.');
+            fetchDashboardData();
+          } catch (err: any) {
+            console.error('Delete feedback error:', err);
+            Alert.alert('Error', 'Failed to delete feedback record.');
+          }
+        },
+      },
+    ]);
   };
 
   const formatPrice = (price: number) => {
@@ -512,10 +503,15 @@ export default function AdminDashboard() {
       <Text style={styles.refCode}>
         Reference: <Text style={styles.boldText}>{item.reference_code}</Text>
       </Text>
+      {item.proof_url ? (
+        <TouchableOpacity onPress={() => Linking.openURL(item.proof_url!)}>
+          <Text style={[styles.refCode, { marginTop: 6 }]}>View payment proof</Text>
+        </TouchableOpacity>
+      ) : null}
       <QueueCardDivider />
       <QueueCardInfoRow icon={<User size={16} color={adminTheme.colors.accent} style={styles.icon} />}>
-        <Text style={styles.clientName}>{item.profiles?.full_name}</Text>
-        <Text style={styles.clientEmail}>{item.profiles?.email}</Text>
+        <Text style={styles.clientName}>{item.profiles?.full_name || 'Unknown payer'}</Text>
+        <Text style={styles.clientEmail}>{item.profiles?.email || 'No email on file'}</Text>
       </QueueCardInfoRow>
       <Text style={styles.dateText}>Submitted: {formatDate(item.payment_date)}</Text>
     </QueueCard>
@@ -533,31 +529,69 @@ export default function AdminDashboard() {
     const formatBookingTime = (dateStr: string) =>
       new Date(dateStr).toLocaleTimeString('en-KE', { hour: '2-digit', minute: '2-digit' });
 
-    const typeColors =
-      item.type === 'reservation'
-        ? { bg: 'rgba(234, 179, 8, 0.15)', border: adminTheme.colors.warning, text: adminTheme.colors.warning }
-        : { bg: adminTheme.colors.accentMuted, border: adminTheme.colors.accent, text: adminTheme.colors.accent };
+    const typeColors = {
+      backgroundColor: adminTheme.colors.accentMuted,
+      borderColor: adminTheme.colors.accent,
+      textColor: adminTheme.colors.accent,
+    };
+
+    const statusLabel = item.status === 'approved' ? 'APPROVED' : 'VIEWING';
+    const statusColors =
+      item.status === 'approved'
+        ? {
+            backgroundColor: 'rgba(16, 185, 129, 0.15)',
+            borderColor: adminTheme.colors.success,
+            textColor: adminTheme.colors.success,
+          }
+        : typeColors;
+
+    const isRental = item.properties?.type !== 'sale';
 
     return (
       <QueueCard
         title={item.properties?.title}
-        badge={{ label: item.type.toUpperCase(), ...typeColors }}
-        accentColor={typeColors.text}
+        badge={{ label: statusLabel, ...statusColors }}
+        accentColor={statusColors.textColor}
         actions={
-          <>
-            <QueueCardActionButton
-              label="Decline"
-              variant="danger"
-              onPress={() => handleVerifyBooking(item.id, 'declined')}
-              icon={<X size={16} color={adminTheme.colors.danger} style={styles.btnIcon} />}
-            />
-            <QueueCardActionButton
-              label="Approve"
-              variant="primary"
-              onPress={() => handleVerifyBooking(item.id, 'approved')}
-              icon={<CheckCircle size={16} color={adminTheme.colors.onAccent} style={styles.btnIcon} />}
-            />
-          </>
+          item.status === 'approved' ? (
+            <>
+              {isRental ? (
+                <QueueCardActionButton
+                  label="Lease"
+                  variant="primary"
+                  onPress={() => setConvertBooking(item)}
+                  icon={<FilePlus size={16} color={adminTheme.colors.onAccent} style={styles.btnIcon} />}
+                />
+              ) : null}
+              <QueueCardActionButton
+                label="Cancel"
+                variant="danger"
+                onPress={() => handleVerifyBooking(item.id, 'cancelled')}
+                icon={<X size={16} color={adminTheme.colors.danger} style={styles.btnIcon} />}
+              />
+              <QueueCardActionButton
+                label="Complete"
+                variant="primary"
+                onPress={() => handleVerifyBooking(item.id, 'completed')}
+                icon={<CheckCheck size={16} color={adminTheme.colors.onAccent} style={styles.btnIcon} />}
+              />
+            </>
+          ) : (
+            <>
+              <QueueCardActionButton
+                label="Decline"
+                variant="danger"
+                onPress={() => handleVerifyBooking(item.id, 'declined')}
+                icon={<X size={16} color={adminTheme.colors.danger} style={styles.btnIcon} />}
+              />
+              <QueueCardActionButton
+                label="Approve"
+                variant="primary"
+                onPress={() => handleVerifyBooking(item.id, 'approved')}
+                icon={<CheckCircle size={16} color={adminTheme.colors.onAccent} style={styles.btnIcon} />}
+              />
+            </>
+          )
         }
       >
         <Text style={styles.locationText}>{item.properties?.location}</Text>
@@ -573,6 +607,9 @@ export default function AdminDashboard() {
             {formatBookingDate(item.booking_date)} at {formatBookingTime(item.booking_date)}
           </Text>
         </QueueCardInfoRow>
+        {item.properties?.type === 'sale' ? (
+          <Text style={styles.locationText}>Sale listing — complete viewing, then mark property sold when closed.</Text>
+        ) : null}
         {item.notes ? (
           <View style={styles.noteBox}>
             <FileText size={14} color={adminTheme.colors.textMuted} style={styles.noteIcon} />
@@ -592,7 +629,7 @@ export default function AdminDashboard() {
       <QueueCard
         title={item.title}
         badge={{ label: item.priority.toUpperCase(), ...colors }}
-        accentColor={colors.text}
+        accentColor={colors.textColor}
         actions={
           <>
             {item.status === 'pending' ? (
@@ -631,7 +668,7 @@ export default function AdminDashboard() {
         {item.image_urls?.length ? (
           <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.maintImageRow}>
             {item.image_urls.map((uri) => (
-              <Image key={uri} source={{ uri }} style={styles.maintImage} />
+              <Image key={uri} source={{ uri }} style={styles.maintImage} contentFit="cover" cachePolicy="memory-disk" />
             ))}
           </ScrollView>
         ) : null}
@@ -670,7 +707,7 @@ export default function AdminDashboard() {
       <QueueCard
         title={item.profiles?.full_name || 'Anonymous User'}
         badge={{ label: item.type.toUpperCase(), ...colors }}
-        accentColor={colors.text}
+        accentColor={colors.textColor}
         actions={
           <View style={{ flexDirection: 'row', gap: 8 }}>
             <QueueCardActionButton
@@ -704,7 +741,7 @@ export default function AdminDashboard() {
   const renderHeader = () => {
     const listTitles: Record<DashboardTab, string> = {
       payments: 'Pending Payment Proofs',
-      bookings: 'Pending Viewing / Reservations',
+      bookings: 'Viewing Requests',
       maintenance: 'Active Maintenance Tickets',
       feedback: 'User Feedback & Complaints',
     };
@@ -808,7 +845,7 @@ export default function AdminDashboard() {
       case 'payments':
         return 'No pending rent payments awaiting verification.';
       case 'bookings':
-        return 'No pending viewing or reservation requests.';
+        return 'No viewing requests awaiting review or completion.';
       case 'maintenance':
         return 'No active maintenance tickets pending attention.';
       case 'feedback':
@@ -826,13 +863,23 @@ export default function AdminDashboard() {
         <DashboardSkeleton />
       ) : (
         <FlatList
+          ref={listRef}
           data={getActiveData()}
           keyExtractor={(item) => item.id}
           ListHeaderComponent={renderHeader}
           renderItem={renderItem}
           contentContainerStyle={styles.listContainer}
           onRefresh={fetchDashboardData}
-          refreshing={loading}
+          refreshing={queuesQuery.isRefetching || statsQuery.isRefetching}
+          onScrollToIndexFailed={(info) => {
+            listRef.current?.scrollToOffset({
+              offset: info.averageItemLength * info.index,
+              animated: true,
+            });
+          }}
+          initialNumToRender={LIST_PERF.initialNumToRender}
+          windowSize={LIST_PERF.windowSize}
+          maxToRenderPerBatch={LIST_PERF.maxToRenderPerBatch}
           ListEmptyComponent={
             <View style={styles.emptyCentered}>
               <ShieldAlert size={48} color={adminTheme.colors.textMuted} style={styles.emptyIcon} />
@@ -848,6 +895,16 @@ export default function AdminDashboard() {
         maintenanceRequestId={materialsRequest?.id || ''}
         maintenanceTitle={materialsRequest?.title || ''}
         userId={user?.id || ''}
+      />
+
+      <ConvertBookingToLeaseModal
+        visible={!!convertBooking}
+        booking={convertBooking}
+        onClose={() => setConvertBooking(null)}
+        onCreated={() => {
+          setConvertBooking(null);
+          fetchDashboardData();
+        }}
       />
     </View>
   );

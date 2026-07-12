@@ -55,6 +55,9 @@ export async function hasPendingInvite(email: string): Promise<boolean> {
 /** Marks an invite as accepted once the profile has been created. */
 export async function markInviteAccepted(inviteId: string): Promise<void> {
   try {
+    const { error: rpcError } = await supabase.rpc('accept_invite', { p_invite_id: inviteId });
+    if (!rpcError) return;
+    // Fallback for environments that have not applied the accept_invite RPC yet.
     await supabase.from('user_invites').update({ status: 'accepted' }).eq('id', inviteId);
   } catch (err) {
     console.warn('[invites] Failed to mark invite accepted:', err);
