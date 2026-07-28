@@ -1,5 +1,21 @@
 import * as SecureStore from 'expo-secure-store';
 
+/** Clerk usernames allow letters, digits, '-', '_'; derive from a display name or email. */
+export function deriveClerkUsername(displayName: string, email: string): string {
+  let username = displayName.toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_-]/g, '');
+  if (username.length < 4) {
+    username = email.split('@')[0].toLowerCase().replace(/[^a-z0-9_-]/g, '');
+  }
+  if (username.length < 4) {
+    username = `user_${Date.now().toString(36)}`;
+  }
+  return username.slice(0, 64);
+}
+
+export function withUsernameSuffix(username: string): string {
+  return `${username.slice(0, 59)}_${Math.floor(1000 + Math.random() * 9000)}`;
+}
+
 export interface TokenCache {
   getToken: (key: string) => Promise<string | null>;
   saveToken: (key: string, value: string) => Promise<void>;

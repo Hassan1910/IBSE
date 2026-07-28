@@ -13,6 +13,7 @@ import {
 } from 'react-native';
 import { useSignUp, useAuth } from '@clerk/clerk-expo';
 import { useRouter } from 'expo-router';
+import { deriveClerkUsername, withUsernameSuffix } from '../../lib/clerk';
 import { supabase, setSupabaseToken } from '../../lib/supabase';
 import { logAudit } from '../../lib/audit';
 import { resolveInvite, markInviteAccepted, hasPendingInvite } from '../../lib/invites';
@@ -36,8 +37,6 @@ export default function SignUpScreen() {
   const [password, setPassword] = React.useState('');
   const [phone, setPhone] = React.useState('');
   const [role, setRole] = React.useState<'tenant' | 'client'>('client');
-  const [pendingVerification, setPendingVerification] = React.useState(false);
-  const [code, setCode] = React.useState('');
   const [loading, setLoading] = React.useState(false);
   const [landlordRequestVisible, setLandlordRequestVisible] = React.useState(false);
 
@@ -120,50 +119,58 @@ export default function SignUpScreen() {
         }
       }
 
-      await signUp.create({
-        emailAddress,
-        password,
-        firstName: fullName.split(' ')[0] || '',
-        lastName: fullName.split(' ').slice(1).join(' ') || '',
-      });
+      const firstName = fullName.split(' ')[0] || '';
+      const lastName = fullName.split(' ').slice(1).join(' ') || '';
+      let username = deriveClerkUsername(fullName, emailAddress);
 
-      // Only prompt OTP when Clerk explicitly requires it.
-      if (signUp.status === 'complete') {
-        await completeSignUpFlow(signUp.createdUserId, signUp.createdSessionId);
-        return;
+      let created;
+      try {
+        created = await signUp.create({
+          emailAddress,
+          password,
+          username,
+          firstName,
+          lastName,
+        });
+      } catch (createErr: any) {
+        const usernameTaken = createErr?.errors?.some(
+          (e: any) =>
+            e.code === 'form_identifier_exists' &&
+            (e.meta?.paramName === 'username' || e.meta?.param_name === 'username'),
+        );
+        if (!usernameTaken) throw createErr;
+        username = withUsernameSuffix(username);
+        created = await signUp.create({
+          emailAddress,
+          password,
+          username,
+          firstName,
+          lastName,
+        });
       }
 
-      await signUp.prepareEmailAddressVerification({ strategy: 'email_code' });
-      setPendingVerification(true);
+      // If create succeeded but username was still required, set it and continue.
+      if (created.status !== 'complete' && created.missingFields?.includes('username')) {
+        username = withUsernameSuffix(username);
+        created = await signUp.update({ username });
+      }
+
+      // Verify-at-sign-up is off in Clerk — create should finish in one step.
+      if (created.status !== 'complete') {
+        const missing = [
+          ...(created.missingFields || []),
+          ...(created.unverifiedFields || []),
+        ].join(', ');
+        throw new Error(
+          missing
+            ? `Sign-up incomplete. Missing or unverified: ${missing}.`
+            : `Sign-up incomplete (status: ${created.status}).`,
+        );
+      }
+
+      await completeSignUpFlow(created.createdUserId, created.createdSessionId);
     } catch (err: any) {
       Alert.alert('Signup Failed', err.errors?.[0]?.message || err.message || 'An error occurred.');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // OTP Verification Submission
-  const onPressVerify = async () => {
-    if (!isLoaded) return;
-
-    if (!code) {
-      Alert.alert('Validation Error', 'Please enter the verification code.');
-      return;
-    }
-
-    try {
-      setLoading(true);
-      const completeSignUp = await signUp.attemptEmailAddressVerification({
-        code,
-      });
-
-      if (completeSignUp.status !== 'complete') {
-        throw new Error('Verification not complete. Please check the code.');
-      }
-
-      await completeSignUpFlow(completeSignUp.createdUserId, completeSignUp.createdSessionId);
-    } catch (err: any) {
-      Alert.alert('Verification Failed', err.errors?.[0]?.message || err.message || 'An error occurred.');
     } finally {
       setLoading(false);
     }
@@ -180,156 +187,117 @@ export default function SignUpScreen() {
           <Text style={styles.subtitle}>Real Estate & Property Management</Text>
         </View>
 
-        {!pendingVerification ? (
-          <View style={styles.card}>
-            <Text style={styles.cardTitle}>Create Account</Text>
+        <View style={styles.card}>
+          <Text style={styles.cardTitle}>Create Account</Text>
 
-            <View style={styles.inputGroup}>
-              <Text style={styles.label}>Full Name</Text>
-              <TextInput
-                style={styles.input}
-                placeholder="Philip Liban"
-                placeholderTextColor="#999"
-                value={fullName}
-                onChangeText={setFullName}
-                autoCapitalize="words"
-              />
-            </View>
+          <View style={styles.inputGroup}>
+            <Text style={styles.label}>Full Name</Text>
+            <TextInput
+              style={styles.input}
+              placeholder="Philip Liban"
+              placeholderTextColor="#999"
+              value={fullName}
+              onChangeText={setFullName}
+              autoCapitalize="words"
+            />
+          </View>
 
-            <View style={styles.inputGroup}>
-              <Text style={styles.label}>Email Address</Text>
-              <TextInput
-                style={styles.input}
-                placeholder="name@domain.com"
-                placeholderTextColor="#999"
-                value={emailAddress}
-                onChangeText={setEmailAddress}
-                autoCapitalize="none"
-                keyboardType="email-address"
-              />
-            </View>
+          <View style={styles.inputGroup}>
+            <Text style={styles.label}>Email Address</Text>
+            <TextInput
+              style={styles.input}
+              placeholder="name@domain.com"
+              placeholderTextColor="#999"
+              value={emailAddress}
+              onChangeText={setEmailAddress}
+              autoCapitalize="none"
+              keyboardType="email-address"
+            />
+          </View>
 
-            <View style={styles.inputGroup}>
-              <Text style={styles.label}>Phone Number</Text>
-              <TextInput
-                style={styles.input}
-                placeholder="e.g. +254 742034932"
-                placeholderTextColor="#999"
-                value={phone}
-                onChangeText={setPhone}
-                keyboardType="phone-pad"
-              />
-            </View>
+          <View style={styles.inputGroup}>
+            <Text style={styles.label}>Phone Number</Text>
+            <TextInput
+              style={styles.input}
+              placeholder="e.g. +254 742034932"
+              placeholderTextColor="#999"
+              value={phone}
+              onChangeText={setPhone}
+              keyboardType="phone-pad"
+            />
+          </View>
 
-            <View style={styles.inputGroup}>
-              <Text style={styles.label}>Password</Text>
-              <TextInput
-                style={styles.input}
-                placeholder="••••••••"
-                placeholderTextColor="#999"
-                value={password}
-                onChangeText={setPassword}
-                secureTextEntry
-                autoCapitalize="none"
-              />
-            </View>
+          <View style={styles.inputGroup}>
+            <Text style={styles.label}>Password</Text>
+            <TextInput
+              style={styles.input}
+              placeholder="••••••••"
+              placeholderTextColor="#999"
+              value={password}
+              onChangeText={setPassword}
+              secureTextEntry
+              autoCapitalize="none"
+            />
+          </View>
 
-            <View style={styles.inputGroup}>
-              <Text style={styles.label}>Select Role</Text>
-              <View style={styles.roleContainer}>
-                {ROLES.map((r) => (
-                  <TouchableOpacity
-                    key={r.value}
+          <View style={styles.inputGroup}>
+            <Text style={styles.label}>Select Role</Text>
+            <View style={styles.roleContainer}>
+              {ROLES.map((r) => (
+                <TouchableOpacity
+                  key={r.value}
+                  style={[
+                    styles.roleBtn,
+                    role === r.value && styles.roleBtnActive,
+                  ]}
+                  onPress={() => setRole(r.value as any)}
+                >
+                  <Text
                     style={[
-                      styles.roleBtn,
-                      role === r.value && styles.roleBtnActive,
+                      styles.roleText,
+                      role === r.value && styles.roleTextActive,
                     ]}
-                    onPress={() => setRole(r.value as any)}
                   >
-                    <Text
-                      style={[
-                        styles.roleText,
-                        role === r.value && styles.roleTextActive,
-                      ]}
-                    >
-                      {r.label}
-                    </Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
-              <Text style={styles.roleHint}>
-                Landlord accounts are created by IBSA after review — request access below.
-                Staff accounts (finance/admin) are invited by an administrator.
-              </Text>
-              <TouchableOpacity
-                style={styles.landlordRequestLink}
-                onPress={() => setLandlordRequestVisible(true)}
-                accessibilityRole="button"
-              >
-                <Text style={styles.link}>Request a landlord account</Text>
-              </TouchableOpacity>
+                    {r.label}
+                  </Text>
+                </TouchableOpacity>
+              ))}
             </View>
-
-            <TouchableOpacity style={styles.submitButton} onPress={onSignUpPress} disabled={loading}>
-              {loading ? (
-                <ActivityIndicator color="#fff" />
-              ) : (
-                <Text style={styles.submitButtonText}>Sign Up</Text>
-              )}
-            </TouchableOpacity>
-
-            <View style={styles.footerLink}>
-              <Text style={styles.footerText}>Already have an account? </Text>
-              <TouchableOpacity onPress={() => router.replace('/(auth)/login')}>
-                <Text style={styles.link}>Log In</Text>
-              </TouchableOpacity>
-            </View>
-
-            <TouchableOpacity
-              style={styles.backToListings}
-              onPress={() => router.replace('/')}
-            >
-              <Text style={styles.link}>Back to listings</Text>
-            </TouchableOpacity>
-          </View>
-        ) : (
-          <View style={styles.card}>
-            <Text style={styles.cardTitle}>Verify Email</Text>
-            <Text style={styles.infoText}>
-              A 6-digit verification code was sent to <Text style={styles.boldText}>{emailAddress}</Text>.
+            <Text style={styles.roleHint}>
+              Landlord accounts are created by IBSA after review — request access below.
+              Staff accounts (finance/admin) are invited by an administrator.
             </Text>
-
-            <View style={styles.inputGroup}>
-              <Text style={styles.label}>Verification Code</Text>
-              <TextInput
-                style={[styles.input, styles.otpInput]}
-                placeholder="123456"
-                placeholderTextColor="#999"
-                value={code}
-                onChangeText={setCode}
-                keyboardType="number-pad"
-                maxLength={6}
-                autoFocus
-              />
-            </View>
-
-            <TouchableOpacity style={styles.submitButton} onPress={onPressVerify} disabled={loading}>
-              {loading ? (
-                <ActivityIndicator color="#fff" />
-              ) : (
-                <Text style={styles.submitButtonText}>Verify & Complete</Text>
-              )}
-            </TouchableOpacity>
-
             <TouchableOpacity
-              style={styles.backButton}
-              onPress={() => setPendingVerification(false)}
-              disabled={loading}
+              style={styles.landlordRequestLink}
+              onPress={() => setLandlordRequestVisible(true)}
+              accessibilityRole="button"
             >
-              <Text style={styles.backButtonText}>Back to details</Text>
+              <Text style={styles.link}>Request a landlord account</Text>
             </TouchableOpacity>
           </View>
-        )}
+
+          <TouchableOpacity style={styles.submitButton} onPress={onSignUpPress} disabled={loading}>
+            {loading ? (
+              <ActivityIndicator color="#fff" />
+            ) : (
+              <Text style={styles.submitButtonText}>Sign Up</Text>
+            )}
+          </TouchableOpacity>
+
+          <View style={styles.footerLink}>
+            <Text style={styles.footerText}>Already have an account? </Text>
+            <TouchableOpacity onPress={() => router.replace('/(auth)/login')}>
+              <Text style={styles.link}>Log In</Text>
+            </TouchableOpacity>
+          </View>
+
+          <TouchableOpacity
+            style={styles.backToListings}
+            onPress={() => router.replace('/')}
+          >
+            <Text style={styles.link}>Back to listings</Text>
+          </TouchableOpacity>
+        </View>
       </ScrollView>
 
       <RequestLandlordAccountModal
@@ -472,32 +440,5 @@ const styles = StyleSheet.create({
     color: '#38BDF8',
     fontSize: 14,
     fontWeight: 'bold',
-  },
-  infoText: {
-    fontSize: 15,
-    color: '#94A3B8',
-    textAlign: 'center',
-    marginBottom: 20,
-    lineHeight: 22,
-  },
-  boldText: {
-    color: '#F8FAFC',
-    fontWeight: 'bold',
-  },
-  otpInput: {
-    textAlign: 'center',
-    fontSize: 24,
-    letterSpacing: 6,
-    fontWeight: 'bold',
-  },
-  backButton: {
-    alignItems: 'center',
-    marginTop: 16,
-    paddingVertical: 8,
-  },
-  backButtonText: {
-    color: '#94A3B8',
-    fontSize: 14,
-    textDecorationLine: 'underline',
   },
 });
