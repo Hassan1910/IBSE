@@ -17,10 +17,17 @@ import { ClerkProvider, useAuth, useUser } from '@clerk/clerk-expo';
 import { QueryClientProvider } from '@tanstack/react-query';
 import { tokenCache } from '../lib/clerk';
 import { useRole } from '../hooks/useRole';
-import { setSupabaseToken, setSupabaseTokenGetter } from '../lib/supabase';
+import { setSupabaseToken, setSupabaseTokenGetter, supabase } from '../lib/supabase';
 import { isMaintenanceMode } from '../lib/settings';
 import { registerForPushNotifications } from '../lib/push';
 import { queryClient } from '../lib/queryClient';
+import {
+  clearAuthIntent,
+  getAuthIntent,
+  isPaymentResumeHeld,
+} from '../lib/authIntent';
+import { setNotificationPushNavigation } from '../lib/notificationMoneySync';
+import type { NotificationRole } from '../lib/notificationRoutes';
 import 'react-native-reanimated';
 
 export {
@@ -56,13 +63,17 @@ function MisconfiguredScreen({ missing }: { missing: string[] }) {
 function InitialLayout() {
   const { isLoaded: isAuthLoaded, isSignedIn, getToken, signOut } = useAuth();
   const { user } = useUser();
-  const { role, loading: isRoleLoading } = useRole();
+  const { role, accountStatus, loading: isRoleLoading, refresh: refreshRole } = useRole();
   const segments = useSegments();
   const pathname = usePathname();
   const router = useRouter();
   const navigationState = useRootNavigationState();
   const [maintenanceBlocked, setMaintenanceBlocked] = useState(false);
   const [checkingMaintenance, setCheckingMaintenance] = useState(false);
+  const accountBlocked =
+    isSignedIn &&
+    !!role &&
+    (accountStatus === 'pending' || accountStatus === 'rejected');
 
   // Register a dynamic token getter so every Supabase request uses a fresh
   // Clerk JWT. Clerk caches valid tokens and only refetches near expiry, which
@@ -106,6 +117,21 @@ function InitialLayout() {
     });
   }, [isAuthLoaded, isSignedIn, isRoleLoading, role, user?.id]);
 
+  // Push tap → deep link using current role.
+  useEffect(() => {
+    if (!role) {
+      setNotificationPushNavigation(() => null, () => undefined);
+      return;
+    }
+    setNotificationPushNavigation(
+      () => role as NotificationRole,
+      (target) => {
+        if (!target) return;
+        router.navigate(target as any);
+      },
+    );
+  }, [role, router]);
+
   // Maintenance mode: block non-admin signed-in users.
   useEffect(() => {
     if (!isAuthLoaded || !isSignedIn || isRoleLoading || !role) {
@@ -135,13 +161,59 @@ function InitialLayout() {
     };
   }, [isAuthLoaded, isSignedIn, isRoleLoading, role]);
 
+  // While pending/rejected, poll profile + listen for approval so unlock does not require a manual tap.
+  useEffect(() => {
+    if (!accountBlocked || !user?.id) return;
+
+    const channel = supabase
+      .channel(`account-approval:${user.id}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'profiles',
+          filter: `id=eq.${user.id}`,
+        },
+        () => {
+          refreshRole();
+        },
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'notifications',
+          filter: `user_id=eq.${user.id}`,
+        },
+        (payload) => {
+          const type = (payload.new as { type?: string } | null)?.type;
+          if (type === 'account_approval') refreshRole();
+        },
+      )
+      .subscribe();
+
+    const poll = setInterval(() => {
+      refreshRole();
+    }, 12000);
+
+    return () => {
+      clearInterval(poll);
+      void supabase.removeChannel(channel);
+    };
+  }, [accountBlocked, user?.id, refreshRole]);
+
   // Handle Route Guard redirects based on role and auth status
   useEffect(() => {
     if (!isAuthLoaded) return;
     if (!navigationState?.key) return;
     if (maintenanceBlocked) return;
+    if (accountBlocked) return;
 
-    const performRedirect = () => {
+    let cancelled = false;
+
+    const performRedirect = async () => {
       const inAuthGroup = segments[0] === '(auth)';
       // Root index (`/`) is the public listings landing — guests may stay there.
       const onPublicLanding = pathname === '/' || pathname === '';
@@ -151,50 +223,99 @@ function InitialLayout() {
         if (!inAuthGroup && !onPublicLanding) {
           router.replace('/(auth)/login');
         }
-      } else {
-        // Wait until the role finishes loading from Supabase
-        if (isRoleLoading) return;
+        return;
+      }
 
-        if (!role) {
-          // If logged in but no profile exists, let them stay in auth/signup or redirect to login
-          if (!inAuthGroup) {
-            router.replace('/(auth)/login');
-          }
+      // Wait until the role finishes loading from Supabase
+      if (isRoleLoading) return;
+
+      if (!role) {
+        // If logged in but no profile exists, let them stay in auth/signup or redirect to login
+        if (!inAuthGroup) {
+          router.replace('/(auth)/login');
+        }
+        return;
+      }
+
+      const currentGroup = segments[0];
+
+      // Route mapping per role
+      const roleGroups: Record<string, string> = {
+        admin: '(admin)',
+        finance: '(admin)', // Admins and Finance staff share the same dashboard navigation group
+        tenant: '(tenant)',
+        client: '(client)',
+        landlord: '(landlord)',
+      };
+
+      const expectedGroup = roleGroups[role];
+      const intent = await getAuthIntent();
+      if (cancelled) return;
+
+      // Mid-payment modal only: do not bounce away from Explore while the deposit/buy UI is open.
+      if (currentGroup === '(client)' && isPaymentResumeHeld()) {
+        return;
+      }
+
+      // Resume Pay Deposit / Buy after auth — clients only (tenants stay in tenant shell).
+      // If already on Explore without params, properties.tsx resumes from AsyncStorage.
+      if (intent && role === 'client') {
+        const onProperties =
+          currentGroup === '(client)' && (segments as string[]).includes('properties');
+        if (onProperties) {
           return;
         }
 
-        const currentGroup = segments[0];
+        router.replace({
+          pathname: '/(client)/properties',
+          params: {
+            action: intent.action,
+            propertyId: intent.propertyId,
+          },
+        });
+        return;
+      }
 
-        // Route mapping per role
-        const roleGroups: Record<string, string> = {
-          admin: '(admin)',
-          finance: '(admin)', // Admins and Finance staff share the same dashboard navigation group
-          tenant: '(tenant)',
-          client: '(client)',
-          landlord: '(landlord)',
-        };
+      if (intent && role === 'tenant') {
+        await clearAuthIntent();
+      }
 
-        const expectedGroup = roleGroups[role];
+      if (currentGroup === expectedGroup) return;
 
-        if (currentGroup !== expectedGroup) {
-          // Redirect to the correct role dashboard root
-          if (role === 'admin' || role === 'finance') {
-            router.replace('/(admin)/dashboard');
-          } else if (role === 'tenant') {
-            router.replace('/(tenant)/dashboard');
-          } else if (role === 'landlord') {
-            router.replace('/(landlord)/dashboard');
-          } else {
-            router.replace('/(client)/properties');
-          }
-        }
+      // Redirect to the correct role dashboard root
+      if (role === 'admin' || role === 'finance') {
+        if (intent) await clearAuthIntent();
+        router.replace('/(admin)/dashboard');
+      } else if (role === 'landlord') {
+        if (intent) await clearAuthIntent();
+        router.replace('/(landlord)/dashboard');
+      } else if (role === 'tenant') {
+        router.replace('/(tenant)/dashboard');
+      } else {
+        router.replace('/(client)/properties');
       }
     };
 
     // Defer redirect execution to allow the navigation tree to fully mount and register all child routes
-    const timer = setTimeout(performRedirect, 0);
-    return () => clearTimeout(timer);
-  }, [isSignedIn, isAuthLoaded, role, isRoleLoading, segments, pathname, navigationState, maintenanceBlocked, router]);
+    const timer = setTimeout(() => {
+      void performRedirect();
+    }, 0);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [
+    isSignedIn,
+    isAuthLoaded,
+    role,
+    isRoleLoading,
+    segments,
+    pathname,
+    navigationState,
+    maintenanceBlocked,
+    accountBlocked,
+    router,
+  ]);
 
   if (!isAuthLoaded || (isSignedIn && isRoleLoading) || checkingMaintenance) {
     return (
@@ -211,6 +332,33 @@ function InitialLayout() {
         <Text style={styles.maintenanceBody}>
           IBSA Homes is temporarily unavailable. Please try again later, or contact support if you need urgent help.
         </Text>
+        <TouchableOpacity style={styles.maintenanceBtn} onPress={() => signOut()}>
+          <Text style={styles.maintenanceBtnText}>Sign Out</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
+
+  if (accountBlocked) {
+    const isRejected = accountStatus === 'rejected';
+    return (
+      <View style={styles.maintenanceContainer}>
+        <Text style={styles.maintenanceTitle}>
+          {isRejected ? 'Account Not Approved' : 'Account Pending Approval'}
+        </Text>
+        <Text style={styles.maintenanceBody}>
+          {isRejected
+            ? 'Your account was not approved. Contact an administrator if you believe this is a mistake.'
+            : 'Your account is waiting for admin approval. You will be able to access the app once an administrator reviews your signup.'}
+        </Text>
+        {!isRejected ? (
+          <TouchableOpacity
+            style={[styles.maintenanceBtn, styles.checkStatusBtn]}
+            onPress={() => refreshRole()}
+          >
+            <Text style={styles.checkStatusBtnText}>Check Status</Text>
+          </TouchableOpacity>
+        ) : null}
         <TouchableOpacity style={styles.maintenanceBtn} onPress={() => signOut()}>
           <Text style={styles.maintenanceBtnText}>Sign Out</Text>
         </TouchableOpacity>
@@ -302,6 +450,16 @@ const styles = StyleSheet.create({
     paddingHorizontal: 24,
     paddingVertical: 12,
     borderRadius: 10,
+    marginTop: 8,
+  },
+  checkStatusBtn: {
+    backgroundColor: '#334155',
+    marginBottom: 4,
+  },
+  checkStatusBtnText: {
+    color: '#F8FAFC',
+    fontWeight: '700',
+    fontSize: 15,
   },
   maintenanceBtnText: {
     color: '#0F172A',

@@ -9,10 +9,11 @@ import {
   Alert,
 } from 'react-native';
 import { Image } from 'expo-image';
-import { MapPin, Tag, Calendar } from 'lucide-react-native';
+import { MapPin, Tag, Calendar, ShoppingBag, Wallet } from 'lucide-react-native';
 import { useInfiniteList } from '../hooks/queries/useInfiniteList';
 import { fetchAvailablePropertiesPage } from '../hooks/queries/fetchers';
 import { LIST_PERF, PAGE_SIZE } from '../lib/queryClient';
+import { depositAmountFromRent } from '../lib/depositPayments';
 
 export interface BrowseProperty {
   id: string;
@@ -22,11 +23,13 @@ export interface BrowseProperty {
   category: 'residential' | 'commercial' | 'land';
   price: number;
   location: string;
-  status: 'available' | 'rented' | 'sold';
+  status: 'available' | 'reserved' | 'rented' | 'sold';
   image_urls: string[];
 }
 
-const CATEGORIES = ['All', 'Residential', 'Commercial', 'Land'];
+type BrowseCategory = 'Residential' | 'Commercial' | 'Land';
+
+const ALL_CATEGORIES: BrowseCategory[] = ['Residential', 'Commercial', 'Land'];
 
 function formatPrice(price: number, type: string) {
   const formatted = new Intl.NumberFormat('en-KE', {
@@ -39,19 +42,44 @@ function formatPrice(price: number, type: string) {
 
 type PropertyBrowseListProps = {
   onAction: (property: BrowseProperty) => void;
+  /** Optional secondary action (e.g. Request viewing on sale listings). */
+  onSecondaryAction?: (property: BrowseProperty) => void;
   /** Optional override for the card CTA label. Defaults by property type. */
   actionLabel?: (property: BrowseProperty) => string;
+  /** Optional override for secondary CTA label. */
+  secondaryActionLabel?: (property: BrowseProperty) => string;
   /** Renders above category tabs; scrolls with the list. */
   ListHeaderComponent?: React.ReactElement | null;
   /** Hide category filter tabs (e.g. compact embeds). */
   hideCategoryTabs?: boolean;
+  /** Limit visible tabs and fetch results to these categories (e.g. client browse). */
+  allowedCategories?: BrowseCategory[];
 };
 
 const PropertyBrowseList = forwardRef<FlatList<BrowseProperty>, PropertyBrowseListProps>(
   function PropertyBrowseList(
-    { onAction, actionLabel, ListHeaderComponent, hideCategoryTabs = false },
+    {
+      onAction,
+      onSecondaryAction,
+      actionLabel,
+      secondaryActionLabel,
+      ListHeaderComponent,
+      hideCategoryTabs = false,
+      allowedCategories,
+    },
     ref
   ) {
+    const categoryTabs = [
+      'All',
+      ...(allowedCategories && allowedCategories.length > 0
+        ? allowedCategories
+        : ALL_CATEGORIES),
+    ];
+    const allowedDbCategories =
+      allowedCategories && allowedCategories.length > 0
+        ? allowedCategories.map((c) => c.toLowerCase())
+        : undefined;
+
     const [selectedCategory, setSelectedCategory] = useState('All');
 
     const {
@@ -63,8 +91,14 @@ const PropertyBrowseList = forwardRef<FlatList<BrowseProperty>, PropertyBrowseLi
       refresh,
       loadMore,
     } = useInfiniteList<BrowseProperty>(
-      ['properties', 'available', selectedCategory],
-      (page) => fetchAvailablePropertiesPage(selectedCategory, page),
+      [
+        'properties',
+        'available',
+        selectedCategory,
+        allowedDbCategories?.join(',') ?? 'all',
+      ],
+      (page) =>
+        fetchAvailablePropertiesPage(selectedCategory, page, allowedDbCategories),
       PAGE_SIZE.properties
     );
 
@@ -80,15 +114,13 @@ const PropertyBrowseList = forwardRef<FlatList<BrowseProperty>, PropertyBrowseLi
         {ListHeaderComponent}
         {!hideCategoryTabs ? (
           <View style={styles.tabContainer}>
-            {CATEGORIES.map((cat) => (
+            {categoryTabs.map((cat) => (
               <TouchableOpacity
                 key={cat}
                 style={[styles.tabBtn, selectedCategory === cat && styles.tabBtnActive]}
                 onPress={() => setSelectedCategory(cat)}
               >
-                <Text
-                  style={[styles.tabText, selectedCategory === cat && styles.tabTextActive]}
-                >
+                <Text style={[styles.tabText, selectedCategory === cat && styles.tabTextActive]}>
                   {cat}
                 </Text>
               </TouchableOpacity>
@@ -107,7 +139,7 @@ const PropertyBrowseList = forwardRef<FlatList<BrowseProperty>, PropertyBrowseLi
       <View style={styles.flex}>
         <FlatList
           ref={ref}
-          data={loading && properties.length === 0 ? [] : properties}
+          data={properties}
           keyExtractor={(item) => item.id}
           ListHeaderComponent={renderHeader}
           renderItem={({ item }) => (
@@ -116,7 +148,7 @@ const PropertyBrowseList = forwardRef<FlatList<BrowseProperty>, PropertyBrowseLi
                 source={{
                   uri:
                     item.image_urls?.[0] ||
-                    'https://images.unsplash.com/photo-1564013799919-ab600027ffc6?auto=format&fit=crop&w=800&q=80',
+                    'https://images.unsplash.com/photo-1560518883-ce09059eeffa?auto=format&fit=crop&w=800&q=80',
                 }}
                 style={styles.cardImage}
                 contentFit="cover"
@@ -141,27 +173,58 @@ const PropertyBrowseList = forwardRef<FlatList<BrowseProperty>, PropertyBrowseLi
                 </View>
 
                 <Text style={styles.price}>{formatPrice(item.price, item.type)}</Text>
+                {item.type === 'rental' ? (
+                  <Text style={styles.depositNote}>
+                    Deposit:{' '}
+                    {formatPrice(depositAmountFromRent(item.price), 'sale')} (½ month,
+                    refundable)
+                  </Text>
+                ) : null}
                 <Text style={styles.description} numberOfLines={2}>
                   {item.description}
                 </Text>
                 {item.type === 'sale' ? (
                   <Text style={styles.saleNote}>
-                    For sale — request a viewing. Purchase is completed offline with IBSA
-                    staff (no in-app checkout).
+                    For sale — submit payment proof in-app. IBSA staff verifies, then the
+                    listing is marked sold. You can also request a viewing first.
                   </Text>
-                ) : null}
+                ) : (
+                  <Text style={styles.saleNote}>
+                    Pay a security deposit (½ month rent) to reserve. Full rent is still due
+                    when you occupy. Deposit is refunded on exit if there is no damage.
+                  </Text>
+                )}
 
                 <View style={styles.cardFooter}>
                   <TouchableOpacity style={styles.bookBtn} onPress={() => onAction(item)}>
-                    <Calendar size={16} color="#0F172A" style={styles.btnIcon} />
+                    {item.type === 'sale' ? (
+                      <ShoppingBag size={16} color="#0F172A" style={styles.btnIcon} />
+                    ) : (
+                      <Wallet size={16} color="#0F172A" style={styles.btnIcon} />
+                    )}
                     <Text style={styles.bookBtnText}>
                       {actionLabel
                         ? actionLabel(item)
                         : item.type === 'sale'
-                          ? 'Request Viewing'
-                          : 'Book Viewing'}
+                          ? 'Buy Property'
+                          : 'Pay Deposit'}
                     </Text>
                   </TouchableOpacity>
+                  {onSecondaryAction ? (
+                    <TouchableOpacity
+                      style={styles.secondaryBtn}
+                      onPress={() => onSecondaryAction(item)}
+                    >
+                      <Calendar size={14} color="#38BDF8" style={styles.btnIcon} />
+                      <Text style={styles.secondaryBtnText}>
+                        {secondaryActionLabel
+                          ? secondaryActionLabel(item)
+                          : item.type === 'sale'
+                            ? 'Request Viewing'
+                            : 'Book Viewing'}
+                      </Text>
+                    </TouchableOpacity>
+                  ) : null}
                 </View>
               </View>
             </View>
@@ -237,15 +300,16 @@ const styles = StyleSheet.create({
     color: '#38BDF8',
   },
   loadingInline: {
-    paddingVertical: 48,
-    alignItems: 'center',
-  },
-  loadingMore: {
-    paddingVertical: 20,
+    paddingVertical: 40,
     alignItems: 'center',
   },
   listContainer: {
     paddingBottom: 40,
+    paddingTop: 8,
+  },
+  loadingMore: {
+    paddingVertical: 16,
+    alignItems: 'center',
   },
   emptyList: {
     flexGrow: 1,
@@ -323,10 +387,16 @@ const styles = StyleSheet.create({
     lineHeight: 17,
     marginBottom: 16,
   },
+  depositNote: {
+    color: '#94A3B8',
+    fontSize: 13,
+    marginBottom: 4,
+  },
   cardFooter: {
     borderTopWidth: 1,
     borderTopColor: '#334155',
     paddingTop: 14,
+    gap: 10,
   },
   bookBtn: {
     backgroundColor: '#38BDF8',
@@ -335,6 +405,21 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     flexDirection: 'row',
+  },
+  secondaryBtn: {
+    borderRadius: 8,
+    paddingVertical: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexDirection: 'row',
+    borderWidth: 1,
+    borderColor: '#38BDF8',
+    backgroundColor: 'transparent',
+  },
+  secondaryBtnText: {
+    color: '#38BDF8',
+    fontWeight: '600',
+    fontSize: 14,
   },
   btnIcon: {
     marginRight: 8,

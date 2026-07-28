@@ -7,6 +7,7 @@ import RequestLandlordAccountModal from '../components/RequestLandlordAccountMod
 import PropertyBrowseList, {
   type BrowseProperty,
 } from '../components/PropertyBrowseList';
+import { setAuthIntent } from '../lib/authIntent';
 
 export default function PublicListingsLanding() {
   const router = useRouter();
@@ -21,6 +22,17 @@ export default function PublicListingsLanding() {
   const goSignup = useCallback(() => {
     router.push('/(auth)/signup');
   }, [router]);
+
+  const goLoginForProperty = useCallback(
+    async (property: BrowseProperty) => {
+      await setAuthIntent({
+        action: property.type === 'sale' ? 'purchase' : 'deposit',
+        propertyId: property.id,
+      });
+      router.push('/(auth)/login');
+    },
+    [router]
+  );
 
   const openLandlordRequest = useCallback(() => {
     setLandlordRequestVisible(true);
@@ -55,7 +67,7 @@ export default function PublicListingsLanding() {
       <StatusBar style="light" />
       <PropertyBrowseList
         ref={listRef}
-        onAction={goLogin}
+        onAction={goLoginForProperty}
         ListHeaderComponent={header}
       />
       <RequestLandlordAccountModal

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
@@ -14,6 +14,7 @@ import {
 import { supabase } from '../../lib/supabase';
 import { useUser } from '@clerk/clerk-expo';
 import { useQueryClient } from '@tanstack/react-query';
+import { useFocusEffect } from 'expo-router';
 import { useAudit } from '../../hooks/useAudit';
 import {
   AssignableUnit,
@@ -28,7 +29,14 @@ import {
   resolveLandlordRequest,
   type LandlordAccountRequest,
 } from '../../lib/landlordRequests';
-import { X, Shield, Calendar, Trash2, UserPlus, KeyRound, Mail, Users } from 'lucide-react-native';
+import {
+  fetchPendingAccounts,
+  fetchRejectedAccounts,
+  setAccountStatus,
+  type PendingAccount,
+} from '../../lib/accountApproval';
+import { notifyUser } from '../../lib/notifications';
+import { X, Shield, Calendar, Trash2, UserPlus, KeyRound, Mail, Users, Check, XCircle } from 'lucide-react-native';
 import DatePickerModal from '../../components/DatePickerModal';
 import { useInfiniteList } from '../../hooks/queries/useInfiniteList';
 import { fetchAdminUsersPage } from '../../hooks/queries/fetchers';
@@ -41,6 +49,7 @@ interface Profile {
   email: string;
   phone: string;
   role: string;
+  account_status?: string | null;
 }
 
 type InviteRole = 'admin' | 'finance' | 'tenant' | 'client' | 'landlord';
@@ -127,6 +136,10 @@ export default function AdminUsersScreen() {
   const [landlordRequests, setLandlordRequests] = useState<LandlordAccountRequest[]>([]);
   const [loadingLandlordRequests, setLoadingLandlordRequests] = useState(false);
   const [fulfillingRequestId, setFulfillingRequestId] = useState<string | null>(null);
+  const [pendingAccounts, setPendingAccounts] = useState<PendingAccount[]>([]);
+  const [rejectedAccounts, setRejectedAccounts] = useState<PendingAccount[]>([]);
+  const [loadingPendingAccounts, setLoadingPendingAccounts] = useState(false);
+  const [resolvingAccountId, setResolvingAccountId] = useState<string | null>(null);
 
   const loadLandlordRequests = async () => {
     try {
@@ -137,6 +150,22 @@ export default function AdminUsersScreen() {
       console.error('Fetch landlord account requests error:', err);
     } finally {
       setLoadingLandlordRequests(false);
+    }
+  };
+
+  const loadPendingAccounts = async () => {
+    try {
+      setLoadingPendingAccounts(true);
+      const [pending, rejected] = await Promise.all([
+        fetchPendingAccounts(),
+        fetchRejectedAccounts(),
+      ]);
+      setPendingAccounts(pending);
+      setRejectedAccounts(rejected);
+    } catch (err) {
+      console.error('Fetch pending accounts error:', err);
+    } finally {
+      setLoadingPendingAccounts(false);
     }
   };
 
@@ -183,7 +212,75 @@ export default function AdminUsersScreen() {
   useEffect(() => {
     fetchAvailableProperties();
     void loadLandlordRequests();
+    void loadPendingAccounts();
   }, []);
+
+  useFocusEffect(
+    useCallback(() => {
+      void loadPendingAccounts();
+    }, []),
+  );
+
+  const handleAccountDecision = (account: PendingAccount, decision: 'approved' | 'rejected') => {
+    if (!user?.id) return;
+    const actionLabel = decision === 'approved' ? 'Approve' : 'Reject';
+    Alert.alert(
+      `${actionLabel} account`,
+      `${actionLabel} ${account.full_name} (${account.email})?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: actionLabel,
+          style: decision === 'rejected' ? 'destructive' : 'default',
+          onPress: async () => {
+            try {
+              setResolvingAccountId(account.id);
+              await setAccountStatus(account.id, decision);
+              await log({
+                action: decision === 'approved' ? 'approve' : 'reject',
+                entityType: 'profile',
+                entityId: account.id,
+                description: `${actionLabel}d account for ${account.full_name}`,
+              });
+              if (decision === 'approved') {
+                try {
+                  await notifyUser({
+                    userId: account.id,
+                    type: 'account_approval',
+                    title: 'Account approved',
+                    body: 'Your IBSA Homes account has been approved. You can now use the app.',
+                    entityType: 'profile',
+                    entityId: account.id,
+                  });
+                } catch (notifyErr) {
+                  console.warn('Failed to notify approved user:', notifyErr);
+                }
+              } else {
+                try {
+                  await notifyUser({
+                    userId: account.id,
+                    type: 'account_approval',
+                    title: 'Account not approved',
+                    body: 'Your IBSA Homes account was not approved. Contact an administrator if you believe this is a mistake.',
+                    entityType: 'profile',
+                    entityId: account.id,
+                  });
+                } catch (notifyErr) {
+                  console.warn('Failed to notify rejected user:', notifyErr);
+                }
+              }
+              await Promise.all([loadPendingAccounts(), invalidateUsers()]);
+            } catch (err: any) {
+              console.error('Account decision error:', err);
+              Alert.alert('Error', err?.message || `Failed to ${actionLabel.toLowerCase()} account.`);
+            } finally {
+              setResolvingAccountId(null);
+            }
+          },
+        },
+      ],
+    );
+  };
 
   const openCreateFromLandlordRequest = (request: LandlordAccountRequest) => {
     setFulfillingRequestId(request.id);
@@ -610,8 +707,24 @@ export default function AdminUsersScreen() {
             <View style={styles.card}>
               <View style={styles.cardHeader}>
                 <Text style={styles.name}>{item.full_name}</Text>
-                <View style={styles.roleBadge}>
-                  <Text style={styles.roleText}>{item.role.toUpperCase()}</Text>
+                <View style={styles.badgeRow}>
+                  <View style={styles.roleBadge}>
+                    <Text style={styles.roleText}>{item.role.toUpperCase()}</Text>
+                  </View>
+                  {item.account_status && item.account_status !== 'approved' ? (
+                    <View
+                      style={[
+                        styles.statusBadge,
+                        item.account_status === 'pending'
+                          ? styles.statusPending
+                          : styles.statusRejected,
+                      ]}
+                    >
+                      <Text style={styles.statusBadgeText}>
+                        {item.account_status.toUpperCase()}
+                      </Text>
+                    </View>
+                  ) : null}
                 </View>
               </View>
               <Text style={styles.subText}>{item.email}</Text>
@@ -658,43 +771,125 @@ export default function AdminUsersScreen() {
           )}
           contentContainerStyle={styles.listContainer}
           onRefresh={async () => {
-            await Promise.all([refresh(), loadLandlordRequests()]);
+            await Promise.all([refresh(), loadLandlordRequests(), loadPendingAccounts()]);
           }}
-          refreshing={refreshing || loadingLandlordRequests}
+          refreshing={refreshing || loadingLandlordRequests || loadingPendingAccounts}
           onEndReached={loadMore}
           onEndReachedThreshold={0.4}
           ListHeaderComponent={
+            pendingAccounts.length === 0 &&
+            rejectedAccounts.length === 0 &&
             landlordRequests.length === 0 ? null : (
-              <View style={styles.requestsPanel}>
-                <Text style={styles.requestsTitle}>Landlord account requests</Text>
-                <Text style={styles.requestsLead}>
-                  Create an account for each requester, then share login credentials with them.
-                </Text>
-                {landlordRequests.map((request) => (
-                  <View key={request.id} style={styles.requestCard}>
-                    <Text style={styles.requestName}>{request.full_name}</Text>
-                    <Text style={styles.requestMeta}>{request.email}</Text>
-                    <Text style={styles.requestMeta}>{request.phone}</Text>
-                    {request.note ? (
-                      <Text style={styles.requestNote}>{request.note}</Text>
-                    ) : null}
-                    <View style={styles.requestActions}>
-                      <TouchableOpacity
-                        style={[styles.btn, styles.leaseBtn]}
-                        onPress={() => openCreateFromLandlordRequest(request)}
-                      >
-                        <UserPlus size={14} color="#0F172A" style={styles.btnIcon} />
-                        <Text style={styles.leaseBtnText}>Create account</Text>
-                      </TouchableOpacity>
-                      <TouchableOpacity
-                        style={[styles.btn, styles.deleteUserBtn]}
-                        onPress={() => handleDismissLandlordRequest(request)}
-                      >
-                        <Text style={styles.deleteUserBtnText}>Dismiss</Text>
-                      </TouchableOpacity>
-                    </View>
+              <View>
+                {pendingAccounts.length === 0 ? null : (
+                  <View style={styles.requestsPanel}>
+                    <Text style={styles.requestsTitle}>Pending account approvals</Text>
+                    <Text style={styles.requestsLead}>
+                      Review public self-signups before they can access tenant or client areas.
+                    </Text>
+                    {pendingAccounts.map((account) => (
+                      <View key={account.id} style={styles.requestCard}>
+                        <Text style={styles.requestName}>{account.full_name}</Text>
+                        <Text style={styles.requestMeta}>{account.email}</Text>
+                        <Text style={styles.requestMeta}>
+                          {account.role.toUpperCase()}
+                          {account.phone ? ` · ${account.phone}` : ''}
+                        </Text>
+                        <View style={styles.requestActions}>
+                          <TouchableOpacity
+                            style={[styles.btn, styles.leaseBtn]}
+                            disabled={resolvingAccountId === account.id}
+                            onPress={() => handleAccountDecision(account, 'approved')}
+                          >
+                            {resolvingAccountId === account.id ? (
+                              <ActivityIndicator size="small" color="#0F172A" />
+                            ) : (
+                              <>
+                                <Check size={14} color="#0F172A" style={styles.btnIcon} />
+                                <Text style={styles.leaseBtnText}>Approve</Text>
+                              </>
+                            )}
+                          </TouchableOpacity>
+                          <TouchableOpacity
+                            style={[styles.btn, styles.deleteUserBtn]}
+                            disabled={resolvingAccountId === account.id}
+                            onPress={() => handleAccountDecision(account, 'rejected')}
+                          >
+                            <XCircle size={14} color="#EF4444" style={styles.btnIcon} />
+                            <Text style={styles.deleteUserBtnText}>Reject</Text>
+                          </TouchableOpacity>
+                        </View>
+                      </View>
+                    ))}
                   </View>
-                ))}
+                )}
+                {rejectedAccounts.length === 0 ? null : (
+                  <View style={styles.requestsPanel}>
+                    <Text style={styles.requestsTitle}>Rejected accounts</Text>
+                    <Text style={styles.requestsLead}>
+                      Re-approve if a rejection was made in error.
+                    </Text>
+                    {rejectedAccounts.map((account) => (
+                      <View key={account.id} style={styles.requestCard}>
+                        <Text style={styles.requestName}>{account.full_name}</Text>
+                        <Text style={styles.requestMeta}>{account.email}</Text>
+                        <Text style={styles.requestMeta}>
+                          {account.role.toUpperCase()}
+                          {account.phone ? ` · ${account.phone}` : ''}
+                        </Text>
+                        <View style={styles.requestActions}>
+                          <TouchableOpacity
+                            style={[styles.btn, styles.leaseBtn]}
+                            disabled={resolvingAccountId === account.id}
+                            onPress={() => handleAccountDecision(account, 'approved')}
+                          >
+                            {resolvingAccountId === account.id ? (
+                              <ActivityIndicator size="small" color="#0F172A" />
+                            ) : (
+                              <>
+                                <Check size={14} color="#0F172A" style={styles.btnIcon} />
+                                <Text style={styles.leaseBtnText}>Re-approve</Text>
+                              </>
+                            )}
+                          </TouchableOpacity>
+                        </View>
+                      </View>
+                    ))}
+                  </View>
+                )}
+                {landlordRequests.length === 0 ? null : (
+                  <View style={styles.requestsPanel}>
+                    <Text style={styles.requestsTitle}>Landlord account requests</Text>
+                    <Text style={styles.requestsLead}>
+                      Create an account for each requester, then share login credentials with them.
+                    </Text>
+                    {landlordRequests.map((request) => (
+                      <View key={request.id} style={styles.requestCard}>
+                        <Text style={styles.requestName}>{request.full_name}</Text>
+                        <Text style={styles.requestMeta}>{request.email}</Text>
+                        <Text style={styles.requestMeta}>{request.phone}</Text>
+                        {request.note ? (
+                          <Text style={styles.requestNote}>{request.note}</Text>
+                        ) : null}
+                        <View style={styles.requestActions}>
+                          <TouchableOpacity
+                            style={[styles.btn, styles.leaseBtn]}
+                            onPress={() => openCreateFromLandlordRequest(request)}
+                          >
+                            <UserPlus size={14} color="#0F172A" style={styles.btnIcon} />
+                            <Text style={styles.leaseBtnText}>Create account</Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity
+                            style={[styles.btn, styles.deleteUserBtn]}
+                            onPress={() => handleDismissLandlordRequest(request)}
+                          >
+                            <Text style={styles.deleteUserBtnText}>Dismiss</Text>
+                          </TouchableOpacity>
+                        </View>
+                      </View>
+                    ))}
+                  </View>
+                )}
               </View>
             )
           }
@@ -1198,6 +1393,13 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: 'bold',
     color: '#F8FAFC',
+    flex: 1,
+    marginRight: 8,
+  },
+  badgeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
   },
   roleBadge: {
     backgroundColor: 'rgba(56, 189, 248, 0.1)',
@@ -1206,6 +1408,25 @@ const styles = StyleSheet.create({
     borderRadius: 6,
     borderColor: '#38BDF8',
     borderWidth: 1,
+  },
+  statusBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
+    borderWidth: 1,
+  },
+  statusPending: {
+    backgroundColor: 'rgba(234, 179, 8, 0.12)',
+    borderColor: '#EAB308',
+  },
+  statusRejected: {
+    backgroundColor: 'rgba(239, 68, 68, 0.12)',
+    borderColor: '#EF4444',
+  },
+  statusBadgeText: {
+    color: '#F8FAFC',
+    fontSize: 10,
+    fontWeight: '700',
   },
   roleText: {
     color: '#38BDF8',

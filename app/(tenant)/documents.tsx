@@ -9,10 +9,15 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import { useFocusEffect } from 'expo-router';
+import { useFocusEffect, useRouter } from 'expo-router';
 import { useUser } from '@clerk/clerk-expo';
 import { supabase } from '../../lib/supabase';
-import { FileText, Link as LinkIcon, Receipt } from 'lucide-react-native';
+import {
+  fetchClientDepositPayments,
+  getDepositNextStep,
+  type DepositPayment,
+} from '../../lib/depositPayments';
+import { CreditCard, FileText, Link as LinkIcon, Receipt, Wallet } from 'lucide-react-native';
 
 interface LeaseDocRow {
   id: string;
@@ -34,14 +39,35 @@ interface VerifiedPayment {
 
 export default function TenantDocumentsScreen() {
   const { user } = useUser();
+  const router = useRouter();
   const [leaseId, setLeaseId] = useState<string | null>(null);
+  const [leaseStatusById, setLeaseStatusById] = useState<Record<string, string>>({});
   const [leaseTitle, setLeaseTitle] = useState('');
   const [docs, setDocs] = useState<LeaseDocRow[]>([]);
   const [verifiedPayments, setVerifiedPayments] = useState<VerifiedPayment[]>([]);
+  const [deposits, setDeposits] = useState<DepositPayment[]>([]);
   const [loading, setLoading] = useState(true);
 
   const fetchDocuments = useCallback(async () => {
     if (!user?.id) return;
+
+    const loadDepositLeaseStatuses = async (depositRows: DepositPayment[]) => {
+      const leaseIds = [
+        ...new Set(depositRows.map((d) => d.lease_id).filter((id): id is string => !!id)),
+      ];
+      if (leaseIds.length === 0) {
+        setLeaseStatusById({});
+        return;
+      }
+      const { data, error } = await supabase.from('leases').select('id, status').in('id', leaseIds);
+      if (error) throw error;
+      const map: Record<string, string> = {};
+      for (const row of data || []) {
+        map[row.id] = row.status;
+      }
+      setLeaseStatusById(map);
+    };
+
     try {
       setLoading(true);
       const { data: leaseData, error: leaseError } = await supabase
@@ -59,8 +85,10 @@ export default function TenantDocumentsScreen() {
       setLeaseId(currentLease?.id || null);
       setLeaseTitle(currentLease?.properties?.title || '');
 
+      const depositsPromise = fetchClientDepositPayments(user.id);
+
       if (currentLease?.id) {
-        const [{ data: vault, error: vaultError }, { data: payments, error: paymentError }] =
+        const [{ data: vault, error: vaultError }, { data: payments, error: paymentError }, depositRows] =
           await Promise.all([
             supabase
               .from('lease_documents')
@@ -74,6 +102,7 @@ export default function TenantDocumentsScreen() {
               .eq('lease_id', currentLease.id)
               .eq('status', 'verified')
               .order('payment_date', { ascending: false }),
+            depositsPromise,
           ]);
         if (vaultError) throw vaultError;
         if (paymentError) throw paymentError;
@@ -97,9 +126,14 @@ export default function TenantDocumentsScreen() {
         }
         setDocs(vaultDocs);
         setVerifiedPayments((payments as any) || []);
+        setDeposits(depositRows);
+        await loadDepositLeaseStatuses(depositRows);
       } else {
         setDocs([]);
         setVerifiedPayments([]);
+        const depositRows = await depositsPromise;
+        setDeposits(depositRows);
+        await loadDepositLeaseStatuses(depositRows);
       }
     } catch (err) {
       console.error('Fetch tenant documents error:', err);
@@ -128,6 +162,25 @@ export default function TenantDocumentsScreen() {
   const formatPrice = (price: number) =>
     new Intl.NumberFormat('en-KE', { style: 'currency', currency: 'KES', maximumFractionDigits: 0 }).format(price);
 
+  const depositStatusLabel = (status: DepositPayment['status']) => {
+    switch (status) {
+      case 'verified':
+        return 'Verified';
+      case 'failed':
+        return 'Rejected';
+      case 'pending':
+        return 'Pending';
+      case 'released':
+        return 'Released';
+      case 'settled':
+        return 'Settled';
+      default: {
+        const _exhaustive: never = status;
+        return _exhaustive;
+      }
+    }
+  };
+
   if (loading) {
     return (
       <View style={styles.centered}>
@@ -138,6 +191,53 @@ export default function TenantDocumentsScreen() {
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
+      <Text style={styles.sectionTitle}>Security Deposits</Text>
+      <Text style={styles.sectionHint}>
+        Booking deposits you submitted, including amount and any proof you attached.
+      </Text>
+      {deposits.length === 0 ? (
+        <View style={styles.card}>
+          <Text style={styles.emptyText}>No security deposits submitted yet.</Text>
+        </View>
+      ) : (
+        deposits.map((item) => {
+          const linkedStatus = item.lease_id ? leaseStatusById[item.lease_id] ?? null : null;
+          const nextStep = getDepositNextStep(item, linkedStatus);
+          return (
+          <View key={item.id} style={styles.card}>
+            <View style={styles.rowHeader}>
+              <Wallet size={16} color="#38BDF8" />
+              <Text style={styles.cardTitle}>{item.properties?.title || 'Property'}</Text>
+            </View>
+            <Text style={styles.metaText}>Amount: {formatPrice(Number(item.amount))}</Text>
+            <Text style={styles.metaText}>Status: {depositStatusLabel(item.status)}</Text>
+            <Text style={styles.metaText}>
+              {item.payment_method.toUpperCase()} · {item.reference_code}
+            </Text>
+            <Text style={styles.metaText}>Submitted: {formatDate(item.created_at)}</Text>
+            <Text style={styles.nextStepText}>{nextStep.message}</Text>
+            {nextStep.showPayRentCta ? (
+              <TouchableOpacity
+                style={styles.payCta}
+                onPress={() => router.push('/(tenant)/rent')}
+              >
+                <CreditCard size={14} color="#0F172A" style={{ marginRight: 6 }} />
+                <Text style={styles.linkBtnText}>Submit Rent Payment</Text>
+              </TouchableOpacity>
+            ) : null}
+            {item.proof_url ? (
+              <TouchableOpacity style={styles.linkBtn} onPress={() => openUrl(item.proof_url!)}>
+                <LinkIcon size={14} color="#0F172A" style={{ marginRight: 6 }} />
+                <Text style={styles.linkBtnText}>View submitted proof / receipt</Text>
+              </TouchableOpacity>
+            ) : (
+              <Text style={styles.emptyText}>No proof file attached.</Text>
+            )}
+          </View>
+          );
+        })
+      )}
+
       <Text style={styles.sectionTitle}>Lease Document Vault</Text>
       <Text style={styles.sectionHint}>
         {leaseId ? `Documents for ${leaseTitle || 'your lease'}` : 'No pending or active lease found.'}
@@ -231,6 +331,16 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
   },
   linkBtnText: { color: '#0F172A', fontWeight: 'bold', fontSize: 13 },
+  nextStepText: { color: '#CBD5E1', fontSize: 12, lineHeight: 17, marginTop: 4, marginBottom: 4 },
+  payCta: {
+    marginTop: 8,
+    backgroundColor: '#38BDF8',
+    borderRadius: 8,
+    paddingVertical: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexDirection: 'row',
+  },
   secondaryLink: { marginTop: 4, marginBottom: 4 },
   secondaryLinkText: { color: '#38BDF8', fontSize: 12, fontWeight: '600' },
 });

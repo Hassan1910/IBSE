@@ -85,7 +85,19 @@ export function leaseAssignErrorMessage(err: unknown): string {
   if (/overlapping pending or active lease/i.test(message) || /exclusion_violation/i.test(message)) {
     return 'This space already has a pending or active lease for overlapping dates. Terminate or renew the existing agreement instead.';
   }
-  return 'Failed to assign lease.';
+  if (/sale property/i.test(message)) {
+    return 'Cannot create a rental lease for a sale property.';
+  }
+  if (/must be a landlord/i.test(message)) {
+    return 'Selected owner must be a landlord account.';
+  }
+  if (/Booking not found/i.test(message)) {
+    return 'Booking not found or does not match this client and property.';
+  }
+  if (/link.*deposit|already linked|must be verified/i.test(message)) {
+    return message || 'Could not link the verified deposit to the lease.';
+  }
+  return message || 'Failed to assign lease.';
 }
 
 /** Promote a client profile to tenant after lease assignment. Throws on failure. */
@@ -104,6 +116,39 @@ export async function promoteClientToTenant(profileId: string, currentRole?: str
 
   const { error } = await supabase.from('profiles').update({ role: 'tenant' }).eq('id', profileId);
   if (error) throw error;
+}
+
+export type CreatePendingLeaseFromBookingParams = {
+  clientId: string;
+  propertyId: string;
+  ownerId: string;
+  unitId?: string | null;
+  startDate: string;
+  endDate: string;
+  rentAmount: number;
+  depositAmount?: number;
+  bookingId?: string | null;
+  depositId?: string | null;
+};
+
+/** Atomically create a pending lease (owner, link deposit, promote, complete booking). */
+export async function createPendingLeaseFromBooking(
+  params: CreatePendingLeaseFromBookingParams,
+): Promise<string> {
+  const { data, error } = await supabase.rpc('create_pending_lease_from_booking', {
+    p_client_id: params.clientId,
+    p_property_id: params.propertyId,
+    p_owner_id: params.ownerId,
+    p_start_date: params.startDate,
+    p_end_date: params.endDate,
+    p_rent_amount: params.rentAmount,
+    p_unit_id: params.unitId || null,
+    p_deposit_amount: params.depositAmount ?? 0,
+    p_booking_id: params.bookingId || null,
+    p_deposit_id: params.depositId || null,
+  });
+  if (error) throw error;
+  return data as string;
 }
 
 export type AssignableUnit = {

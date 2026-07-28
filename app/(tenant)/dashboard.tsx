@@ -1,13 +1,36 @@
 import React, { useCallback, useEffect, useMemo } from 'react';
-import { View, Text, StyleSheet, ActivityIndicator, Alert, ScrollView, RefreshControl, TouchableOpacity } from 'react-native';
+import {
+  View,
+  Text,
+  StyleSheet,
+  ActivityIndicator,
+  Alert,
+  ScrollView,
+  RefreshControl,
+  TouchableOpacity,
+  Linking,
+} from 'react-native';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { leaseTotalRent, fetchLeaseBalance } from '../../lib/leases';
+import { fetchClientDepositPayments, getDepositNextStep, type DepositPayment } from '../../lib/depositPayments';
 import { useUser } from '@clerk/clerk-expo';
-import { Calendar, CreditCard, DollarSign, FileText, HelpCircle, Home, MessageSquare, Wrench } from 'lucide-react-native';
+import {
+  Calendar,
+  CreditCard,
+  DollarSign,
+  FileText,
+  HelpCircle,
+  Home,
+  MessageSquare,
+  Wallet,
+  Wrench,
+} from 'lucide-react-native';
 import { useNotifications } from '../../hooks/useNotifications';
 import { fetchTenantDashboard } from '../../hooks/queries/fetchers';
 import { queryKeys } from '../../hooks/queries/keys';
+import { invalidateTenantMoneyQueries } from '../../lib/invalidateMoneyQueries';
+import { supabase } from '../../lib/supabase';
 
 interface Lease {
   id: string;
@@ -52,13 +75,54 @@ export default function TenantDashboard() {
     useCallback(() => {
       if (!userId) return;
       void refreshUnreadCount();
-      const state = queryClient.getQueryState(queryKeys.tenantDashboard(userId));
-      const age = state?.dataUpdatedAt ? Date.now() - state.dataUpdatedAt : Infinity;
-      if (age > 30_000) {
-        void queryClient.invalidateQueries({ queryKey: queryKeys.tenantDashboard(userId) });
-      }
+      invalidateTenantMoneyQueries(queryClient, userId);
     }, [queryClient, userId, refreshUnreadCount])
   );
+
+  // Live updates while this screen is mounted (admin verify on another session).
+  useEffect(() => {
+    if (!userId) return;
+
+    const refresh = () => invalidateTenantMoneyQueries(queryClient, userId);
+
+    const channel = supabase
+      .channel(`tenant-money:${userId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'payments',
+          filter: `payer_id=eq.${userId}`,
+        },
+        refresh,
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'deposit_payments',
+          filter: `client_id=eq.${userId}`,
+        },
+        refresh,
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'leases',
+          filter: `tenant_id=eq.${userId}`,
+        },
+        refresh,
+      )
+      .subscribe();
+
+    return () => {
+      void supabase.removeChannel(channel);
+    };
+  }, [queryClient, userId]);
 
   useEffect(() => {
     if (dashboardQuery.isError) {
@@ -75,21 +139,40 @@ export default function TenantDashboard() {
   const balanceLeaseId = activeLease?.id || pendingLease?.id || null;
 
   const balanceQuery = useQuery({
-    queryKey: ['tenant', 'balance', balanceLeaseId],
+    queryKey: balanceLeaseId ? queryKeys.tenantBalance(balanceLeaseId) : ['tenant', 'balance', null],
     queryFn: () => fetchLeaseBalance(balanceLeaseId!),
     enabled: !!balanceLeaseId,
   });
 
+  const depositsQuery = useQuery({
+    queryKey: queryKeys.clientDeposits(userId),
+    queryFn: () => fetchClientDepositPayments(userId),
+    enabled: !!userId,
+  });
+
+  const deposits = (depositsQuery.data as DepositPayment[]) || [];
+
   const loading = dashboardQuery.isLoading && !dashboardQuery.data;
-  const refreshing = dashboardQuery.isRefetching && !dashboardQuery.isLoading;
+  const refreshing =
+    (dashboardQuery.isRefetching && !dashboardQuery.isLoading) ||
+    (depositsQuery.isRefetching && !depositsQuery.isLoading);
 
   const onRefresh = useCallback(async () => {
     await Promise.all([
       dashboardQuery.refetch(),
       balanceQuery.refetch(),
+      depositsQuery.refetch(),
       refreshUnreadCount(),
     ]);
-  }, [dashboardQuery, balanceQuery, refreshUnreadCount]);
+  }, [dashboardQuery, balanceQuery, depositsQuery, refreshUnreadCount]);
+
+  const openUrl = async (url: string) => {
+    try {
+      await Linking.openURL(url);
+    } catch {
+      Alert.alert('Cannot Open', 'This link is not valid.');
+    }
+  };
 
   const formatPrice = (price: number) =>
     new Intl.NumberFormat('en-KE', { style: 'currency', currency: 'KES', maximumFractionDigits: 0 }).format(price);
@@ -105,6 +188,25 @@ export default function TenantDashboard() {
         return styles.statusFailed;
       default:
         return styles.statusPending;
+    }
+  };
+
+  const depositStatusLabel = (status: DepositPayment['status']) => {
+    switch (status) {
+      case 'verified':
+        return 'VERIFIED';
+      case 'failed':
+        return 'REJECTED';
+      case 'pending':
+        return 'PENDING';
+      case 'released':
+        return 'RELEASED';
+      case 'settled':
+        return 'SETTLED';
+      default: {
+        const _exhaustive: never = status;
+        return _exhaustive;
+      }
     }
   };
 
@@ -264,6 +366,60 @@ export default function TenantDashboard() {
         <View style={styles.emptyCard}>
           <Text style={styles.emptyCardText}>No active lease registered under your profile.</Text>
         </View>
+      )}
+
+      <Text style={styles.sectionTitle}>Security Deposits</Text>
+      {deposits.length === 0 ? (
+        <View style={styles.emptyCard}>
+          <Text style={styles.emptyCardText}>No security deposits submitted yet.</Text>
+        </View>
+      ) : (
+        deposits.map((item) => {
+          const linkedLease = item.lease_id
+            ? leases.find((l) => l.id === item.lease_id)
+            : null;
+          const nextStep = getDepositNextStep(item, linkedLease?.status ?? null);
+          return (
+          <View key={item.id} style={styles.payCard}>
+            <View style={styles.payHeader}>
+              <View style={styles.payMethodRow}>
+                <Wallet size={18} color="#38BDF8" style={styles.payIcon} />
+                <Text style={styles.payMethod}>{item.properties?.title || 'Property'}</Text>
+              </View>
+              <View style={[styles.statusBadge, getStatusStyle(item.status)]}>
+                <Text style={styles.statusText}>{depositStatusLabel(item.status)}</Text>
+              </View>
+            </View>
+            <View style={styles.payBody}>
+              <Text style={styles.payAmount}>{formatPrice(Number(item.amount))}</Text>
+              <Text style={styles.payRef}>
+                {item.payment_method.toUpperCase()} · {item.reference_code}
+              </Text>
+            </View>
+            <Text style={styles.payDate}>Submitted {formatDate(item.created_at)}</Text>
+            {item.properties?.location ? (
+              <Text style={styles.depositLoc}>{item.properties.location}</Text>
+            ) : null}
+            <Text style={styles.nextStepText}>{nextStep.message}</Text>
+            {nextStep.showPayRentCta ? (
+              <TouchableOpacity
+                style={[styles.payCta, { marginTop: 12 }]}
+                onPress={() => router.push('/(tenant)/rent')}
+              >
+                <CreditCard size={16} color="#0F172A" style={{ marginRight: 8 }} />
+                <Text style={styles.payCtaText}>Submit Rent Payment</Text>
+              </TouchableOpacity>
+            ) : null}
+            {item.proof_url ? (
+              <TouchableOpacity style={styles.proofLink} onPress={() => openUrl(item.proof_url!)}>
+                <Text style={styles.proofLinkText}>View submitted proof / receipt</Text>
+              </TouchableOpacity>
+            ) : (
+              <Text style={styles.noProofText}>No proof file attached.</Text>
+            )}
+          </View>
+          );
+        })
       )}
 
       <Text style={styles.sectionTitle}>Payment History</Text>
@@ -496,6 +652,8 @@ const styles = StyleSheet.create({
     color: '#F8FAFC',
     fontWeight: 'bold',
     fontSize: 12,
+    flexShrink: 1,
+    maxWidth: 180,
   },
   statusBadge: {
     paddingHorizontal: 8,
@@ -533,6 +691,30 @@ const styles = StyleSheet.create({
   payDate: {
     fontSize: 11,
     color: '#64748B',
+    marginTop: 8,
+  },
+  depositLoc: {
+    fontSize: 12,
+    color: '#94A3B8',
+    marginTop: 4,
+  },
+  nextStepText: {
+    color: '#CBD5E1',
+    fontSize: 12,
+    lineHeight: 17,
+    marginTop: 10,
+  },
+  proofLink: {
+    marginTop: 10,
+  },
+  proofLinkText: {
+    color: '#38BDF8',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  noProofText: {
+    color: '#64748B',
+    fontSize: 12,
     marginTop: 8,
   },
 });

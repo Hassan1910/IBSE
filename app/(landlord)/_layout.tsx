@@ -1,6 +1,7 @@
 import { Tabs } from 'expo-router';
 import { LayoutGrid, Home, Users, Wrench, User } from 'lucide-react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import NotificationBell from '../../components/NotificationBell';
 
 export default function LandlordLayout() {
   const insets = useSafeAreaInsets();
@@ -27,6 +28,7 @@ export default function LandlordLayout() {
           fontWeight: 'bold',
           fontSize: 18,
         },
+        headerRight: () => <NotificationBell href="/(landlord)/notifications" />,
       }}
     >
       <Tabs.Screen

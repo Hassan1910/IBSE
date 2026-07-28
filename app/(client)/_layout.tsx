@@ -1,5 +1,5 @@
 import { Tabs } from 'expo-router';
-import { Home, Calendar, MessageSquare, User } from 'lucide-react-native';
+import { Home, Calendar, MessageSquare, User, ShoppingBag } from 'lucide-react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import NotificationBell from '../../components/NotificationBell';
 
@@ -50,6 +50,14 @@ export default function ClientLayout() {
           title: 'My Viewings & Bookings',
           tabBarLabel: 'Bookings',
           tabBarIcon: ({ color, size }) => <Calendar color={color} size={size} />,
+        }}
+      />
+      <Tabs.Screen
+        name="my-purchases"
+        options={{
+          title: 'My Purchases',
+          tabBarLabel: 'Purchases',
+          tabBarIcon: ({ color, size }) => <ShoppingBag color={color} size={size} />,
         }}
       />
       <Tabs.Screen

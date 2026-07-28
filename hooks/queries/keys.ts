@@ -23,5 +23,8 @@ export const queryKeys = {
   tenantMaintenance: (userId: string) =>
     ['tenant', 'maintenance', userId] as const,
   tenantRent: (userId: string) => ['tenant', 'rent', userId] as const,
+  tenantBalance: (leaseId: string) => ['tenant', 'balance', leaseId] as const,
   clientBookings: (userId: string) => ['client', 'bookings', userId] as const,
+  clientPurchases: (userId: string) => ['client', 'purchases', userId] as const,
+  clientDeposits: (userId: string) => ['client', 'deposits', userId] as const,
 };

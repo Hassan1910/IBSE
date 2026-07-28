@@ -33,7 +33,7 @@ interface Property {
   category: 'residential' | 'commercial' | 'land';
   price: number;
   location: string;
-  status: 'available' | 'rented' | 'sold';
+  status: 'available' | 'reserved' | 'rented' | 'sold';
   image_urls: string[] | null;
 }
 

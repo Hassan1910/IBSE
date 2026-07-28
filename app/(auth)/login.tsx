@@ -16,6 +16,7 @@ import { useRouter } from 'expo-router';
 import { supabase, setSupabaseToken } from '../../lib/supabase';
 import { logAudit } from '../../lib/audit';
 import { resolveInvite, markInviteAccepted } from '../../lib/invites';
+import { notifyAdmins } from '../../lib/notifications';
 
 // Designated administrator account. Only this email is auto-provisioned with the
 // admin role when no Supabase profile exists yet.
@@ -39,14 +40,35 @@ async function provisionAndLogLogin(userId: string, email: string) {
       const invite = await resolveInvite(email);
       const isAdmin = email.trim().toLowerCase() === ADMIN_EMAIL;
       role = invite?.role || (isAdmin ? 'admin' : 'client');
-      await supabase.from('profiles').insert({
+      const { error: insertError } = await supabase.from('profiles').insert({
         id: userId,
         full_name: invite?.fullName || (isAdmin ? 'IBSA Admin' : 'New User'),
         email,
         phone: '+254700000000',
         role,
+        // Trigger forces pending for self-provisioned tenant/client;
+        // staff roles and invite acceptance set approved.
       });
-      if (invite) await markInviteAccepted(invite.inviteId);
+      if (insertError) {
+        console.error('[Login] Profile provision failed:', insertError);
+        throw insertError;
+      }
+      if (invite) {
+        await markInviteAccepted(invite.inviteId);
+      } else if (role === 'tenant' || role === 'client') {
+        try {
+          await notifyAdmins({
+            type: 'account_approval',
+            title: 'New account pending approval',
+            body: `New User (${email}) signed in as ${role} and needs approval.`,
+            entityType: 'profile',
+            entityId: userId,
+            roles: ['admin'],
+          });
+        } catch (notifyErr) {
+          console.warn('[Login] Failed to notify admins of pending account:', notifyErr);
+        }
+      }
     }
 
     await logAudit({

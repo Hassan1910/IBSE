@@ -97,6 +97,7 @@ export default function AdminReportsScreen() {
       property: [
         { label: 'Total Listings', value: String(summary.property.total), accent: true },
         { label: 'Available', value: String(summary.property.available) },
+        { label: 'Reserved', value: String(summary.property.reserved ?? 0) },
         { label: 'Rented', value: String(summary.property.rented) },
         { label: 'Sold', value: String(summary.property.sold) },
         { label: 'Residential', value: String(summary.property.residential) },
@@ -109,13 +110,37 @@ export default function AdminReportsScreen() {
           value: formatPrice(Number(summary.financial.verified_revenue)),
           accent: true,
         },
+        {
+          label: 'Rent Revenue',
+          value: formatPrice(Number(summary.financial.rent_revenue ?? 0)),
+        },
+        {
+          label: 'Purchase Revenue',
+          value: formatPrice(Number(summary.financial.purchase_revenue ?? 0)),
+        },
+        {
+          label: 'Deposits Held',
+          value: formatPrice(Number(summary.financial.deposits_held ?? 0)),
+        },
+        {
+          label: 'Deposits Refunded',
+          value: formatPrice(Number(summary.financial.deposits_refunded ?? 0)),
+        },
+        {
+          label: 'Deposits Retained',
+          value: formatPrice(Number(summary.financial.deposits_retained ?? 0)),
+        },
         { label: 'Total Expenses', value: formatPrice(Number(summary.financial.total_expenses)) },
         { label: 'Net Position', value: formatPrice(net), accent: true },
         {
           label: 'Pending Payments',
           value: formatPrice(Number(summary.financial.pending_amount)),
         },
-        { label: 'Payments Recorded', value: String(summary.financial.payments_count) },
+        { label: 'Rent Payments Recorded', value: String(summary.financial.payments_count) },
+        {
+          label: 'Purchases Recorded',
+          value: String(summary.financial.purchases_count ?? 0),
+        },
       ],
       occupancy: [
         { label: 'Occupancy Rate', value: `${occupancyRate}%`, accent: true },

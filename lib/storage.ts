@@ -170,6 +170,69 @@ export async function uploadLeaseDocumentFile(
   return data.publicUrl;
 }
 
+/** Upload a sale purchase document (PDF/image) to purchase-documents bucket (private). */
+export async function uploadPurchaseDocumentFile(
+  path: string,
+  doc: PickedDocument,
+): Promise<string> {
+  const file = new File(doc.uri);
+  const arrayBuffer = await file.arrayBuffer();
+  const { error } = await supabase.storage.from('purchase-documents').upload(path, arrayBuffer, {
+    upsert: true,
+    contentType: doc.mimeType,
+  });
+  if (error) throw error;
+  // Store the object path — bucket is private; open via createSignedUrl.
+  return path;
+}
+
+/** Resolve a storage object path from a stored path or legacy public URL. */
+export function storageObjectPath(bucket: string, pathOrUrl: string): string {
+  const publicMarker = `/object/public/${bucket}/`;
+  const signMarker = `/object/sign/${bucket}/`;
+  if (pathOrUrl.includes(publicMarker)) {
+    return decodeURIComponent(pathOrUrl.split(publicMarker)[1]?.split('?')[0] || pathOrUrl);
+  }
+  if (pathOrUrl.includes(signMarker)) {
+    return decodeURIComponent(pathOrUrl.split(signMarker)[1]?.split('?')[0] || pathOrUrl);
+  }
+  return pathOrUrl.replace(/^\//, '');
+}
+
+/** Best-effort remove of a payment-proofs object after a failed DB insert. */
+export async function deletePaymentProof(pathOrUrl: string): Promise<void> {
+  const path = storageObjectPath('payment-proofs', pathOrUrl);
+  if (!path) return;
+  const { error } = await supabase.storage.from('payment-proofs').remove([path]);
+  if (error) {
+    console.warn('Failed to clean up orphan payment proof:', error.message);
+  }
+}
+
+/** Best-effort remove of a purchase-documents object after a failed DB insert. */
+export async function deletePurchaseDocumentFile(pathOrUrl: string): Promise<void> {
+  const path = storageObjectPath('purchase-documents', pathOrUrl);
+  if (!path) return;
+  const { error } = await supabase.storage.from('purchase-documents').remove([path]);
+  if (error) {
+    console.warn('Failed to clean up orphan purchase document:', error.message);
+  }
+}
+
+/** Create a short-lived signed URL for a private storage object. */
+export async function createSignedStorageUrl(
+  bucket: string,
+  pathOrUrl: string,
+  expiresInSeconds = 3600,
+): Promise<string> {
+  const path = storageObjectPath(bucket, pathOrUrl);
+  const { data, error } = await supabase.storage
+    .from(bucket)
+    .createSignedUrl(path, expiresInSeconds);
+  if (error) throw error;
+  return data.signedUrl;
+}
+
 /** Upload a generated PDF receipt ArrayBuffer. */
 export async function uploadPaymentReceipt(
   path: string,

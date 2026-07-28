@@ -16,7 +16,8 @@ import { useUser } from '@clerk/clerk-expo';
 import { useAudit } from '../../hooks/useAudit';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useInfiniteList } from '../../hooks/queries/useInfiniteList';
-import { fetchExpensesPage, fetchVerifiedRevenueSum, fetchTotalExpensesSum } from '../../hooks/queries/fetchers';
+import { fetchExpensesPage, fetchRevenueBreakdown, fetchTotalExpensesSum } from '../../hooks/queries/fetchers';
+import { fetchAdminDepositStats } from '../../lib/depositPayments';
 import { queryKeys } from '../../hooks/queries/keys';
 import { PAGE_SIZE, LIST_PERF } from '../../lib/queryClient';
 import DatePickerModal from '../../components/DatePickerModal';
@@ -48,7 +49,12 @@ export default function AdminFinancesScreen() {
 
   const revenueQuery = useQuery({
     queryKey: [...queryKeys.adminFinances, 'revenue'],
-    queryFn: fetchVerifiedRevenueSum,
+    queryFn: fetchRevenueBreakdown,
+  });
+
+  const depositStatsQuery = useQuery({
+    queryKey: [...queryKeys.adminFinances, 'deposits'],
+    queryFn: fetchAdminDepositStats,
   });
 
   const expensesSumQuery = useQuery({
@@ -104,14 +110,20 @@ export default function AdminFinancesScreen() {
   }, [invalidateFinances]);
 
   useEffect(() => {
-    if (revenueQuery.isError || expensesSumQuery.isError || expensesError) {
+    if (revenueQuery.isError || expensesSumQuery.isError || depositStatsQuery.isError || expensesError) {
       Alert.alert('Error', 'Failed to load financial records.');
     }
-  }, [revenueQuery.isError, expensesSumQuery.isError, expensesError]);
+  }, [revenueQuery.isError, expensesSumQuery.isError, depositStatsQuery.isError, expensesError]);
 
-  const revenue = Number(revenueQuery.data ?? 0);
+  const rentRevenue = Number(revenueQuery.data?.rent_revenue ?? 0);
+  const purchaseRevenue = Number(revenueQuery.data?.purchase_revenue ?? 0);
+  const revenue = Number(revenueQuery.data?.total_revenue ?? rentRevenue + purchaseRevenue);
   const totalExpenses = Number(expensesSumQuery.data ?? 0);
   const net = revenue - totalExpenses;
+  const depositsHeld = Number(depositStatsQuery.data?.deposits_held ?? 0);
+  const depositsRefunded = Number(depositStatsQuery.data?.deposits_refunded ?? 0);
+  const depositsRetained = Number(depositStatsQuery.data?.deposits_retained ?? 0);
+  const depositsPending = Number(depositStatsQuery.data?.deposits_pending ?? 0);
 
   const resetForm = () => {
     setEditingId(null);
@@ -204,13 +216,24 @@ export default function AdminFinancesScreen() {
       <View style={styles.summaryRow}>
         <View style={[styles.summaryBox, { borderColor: 'rgba(16,185,129,0.4)' }]}>
           <TrendingUp size={18} color="#10B981" />
-          <Text style={styles.summaryLabel}>Revenue</Text>
+          <Text style={styles.summaryLabel}>Total Revenue</Text>
           <Text style={[styles.summaryVal, { color: '#10B981' }]}>{formatPrice(revenue)}</Text>
         </View>
         <View style={[styles.summaryBox, { borderColor: 'rgba(239,68,68,0.4)' }]}>
           <TrendingDown size={18} color="#EF4444" />
           <Text style={styles.summaryLabel}>Expenses</Text>
           <Text style={[styles.summaryVal, { color: '#EF4444' }]}>{formatPrice(totalExpenses)}</Text>
+        </View>
+      </View>
+
+      <View style={styles.summaryRow}>
+        <View style={[styles.summaryBox, { borderColor: 'rgba(56,189,248,0.35)' }]}>
+          <Text style={styles.summaryLabel}>Rent Verified</Text>
+          <Text style={[styles.summaryVal, { color: '#38BDF8' }]}>{formatPrice(rentRevenue)}</Text>
+        </View>
+        <View style={[styles.summaryBox, { borderColor: 'rgba(168,85,247,0.35)' }]}>
+          <Text style={styles.summaryLabel}>Purchases Verified</Text>
+          <Text style={[styles.summaryVal, { color: '#A855F7' }]}>{formatPrice(purchaseRevenue)}</Text>
         </View>
       </View>
 
@@ -224,12 +247,38 @@ export default function AdminFinancesScreen() {
         </View>
       </View>
 
+      <Text style={[styles.listTitle, { marginTop: 8 }]}>Security Deposits (not revenue)</Text>
+      <View style={styles.summaryRow}>
+        <View style={[styles.summaryBox, { borderColor: 'rgba(234,179,8,0.4)' }]}>
+          <Text style={styles.summaryLabel}>Held</Text>
+          <Text style={[styles.summaryVal, { color: '#EAB308' }]}>{formatPrice(depositsHeld)}</Text>
+        </View>
+        <View style={[styles.summaryBox, { borderColor: 'rgba(56,189,248,0.35)' }]}>
+          <Text style={styles.summaryLabel}>Pending Verify</Text>
+          <Text style={[styles.summaryVal, { color: '#38BDF8' }]}>{formatPrice(depositsPending)}</Text>
+        </View>
+      </View>
+      <View style={styles.summaryRow}>
+        <View style={[styles.summaryBox, { borderColor: 'rgba(16,185,129,0.35)' }]}>
+          <Text style={styles.summaryLabel}>Refunded</Text>
+          <Text style={[styles.summaryVal, { color: '#10B981' }]}>{formatPrice(depositsRefunded)}</Text>
+        </View>
+        <View style={[styles.summaryBox, { borderColor: 'rgba(239,68,68,0.35)' }]}>
+          <Text style={styles.summaryLabel}>Retained (damage)</Text>
+          <Text style={[styles.summaryVal, { color: '#EF4444' }]}>{formatPrice(depositsRetained)}</Text>
+        </View>
+      </View>
+
       <Text style={styles.listTitle}>Recorded Expenses</Text>
     </View>
   );
 
   const initialLoading =
-    (loading || revenueQuery.isLoading || expensesSumQuery.isLoading) && expenses.length === 0;
+    (loading ||
+      revenueQuery.isLoading ||
+      expensesSumQuery.isLoading ||
+      depositStatsQuery.isLoading) &&
+    expenses.length === 0;
 
   return (
     <View style={styles.container}>

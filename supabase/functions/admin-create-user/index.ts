@@ -243,6 +243,7 @@ Deno.serve(async (req) => {
     email,
     phone: null,
     role,
+    account_status: 'approved',
   });
 
   if (profileError) {

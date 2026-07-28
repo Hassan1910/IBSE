@@ -13,14 +13,14 @@ import {
   Image,
   RefreshControl,
 } from 'react-native';
-import { useLocalSearchParams, useRouter } from 'expo-router';
+import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import { supabase } from '../../lib/supabase';
 import { fetchLeaseBalance } from '../../lib/leases';
-import { notifyPropertyOwner } from '../../lib/notifications';
-import { pickDocument, pickImages, uploadPaymentProof, type PickedDocument, type PickedImage } from '../../lib/storage';
+import { notifyAdmins, notifyPropertyOwner } from '../../lib/notifications';
+import { pickDocument, pickImages, uploadPaymentProof, deletePaymentProof, type PickedDocument, type PickedImage } from '../../lib/storage';
 import { useUser } from '@clerk/clerk-expo';
 import { useAudit } from '../../hooks/useAudit';
-import { DollarSign, Key, Send, Paperclip, X } from 'lucide-react-native';
+import { CheckCircle, DollarSign, Key, Send, Paperclip, X } from 'lucide-react-native';
 
 const PAYMENT_METHODS = [
   { label: 'M-Pesa Mobile Money', value: 'mpesa' },
@@ -125,6 +125,17 @@ export default function RentPaymentScreen() {
     void fetchPayableLease();
   }, [fetchPayableLease]);
 
+  useFocusEffect(
+    useCallback(() => {
+      void fetchPayableLease({ silent: true });
+    }, [fetchPayableLease]),
+  );
+
+  useEffect(() => {
+    if (!activeLease?.id) return;
+    setRefCode((current) => (current.trim() ? current : generateFallbackReference()));
+  }, [activeLease?.id]);
+
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
     try {
@@ -150,14 +161,15 @@ export default function RentPaymentScreen() {
             `Payment ${data.reference_code} (${data.payment_method.toUpperCase()}) — ${data.status.toUpperCase()} · KES ${Number(data.amount).toLocaleString()}`,
           );
         }
+        await fetchPayableLease({ silent: true });
       } catch (err) {
         console.error('Load focused payment error:', err);
       } finally {
         router.setParams({ id: undefined });
       }
     };
-    loadFocusedPayment();
-  }, [focusPaymentId, user?.id, router]);
+    void loadFocusedPayment();
+  }, [focusPaymentId, user?.id, router, fetchPayableLease]);
 
   const handlePickProofImage = async () => {
     try {
@@ -230,17 +242,44 @@ export default function RentPaymentScreen() {
     });
 
     if (data?.id && activeLease.property_id) {
+      const notifyTitle = 'Rent Payment Submitted';
+      const notifyBody = `A tenant submitted a payment of KES ${parsedAmount.toLocaleString()} for verification (ref ${usedReference}).`;
+      let ownerId: string | null = null;
+      try {
+        const { data: prop } = await supabase
+          .from('properties')
+          .select('owner_id')
+          .eq('id', activeLease.property_id)
+          .maybeSingle();
+        ownerId = prop?.owner_id ?? null;
+      } catch {
+        ownerId = null;
+      }
       try {
         await notifyPropertyOwner({
           propertyId: activeLease.property_id,
           type: 'payment_submitted',
-          title: 'Rent Payment Submitted',
-          body: `A tenant submitted a payment of KES ${parsedAmount.toLocaleString()} for verification (ref ${usedReference}).`,
+          title: notifyTitle,
+          body: notifyBody,
           entityType: 'payment',
           entityId: data.id,
         });
       } catch (notifyErr) {
         console.error('Notify landlord of payment error:', notifyErr);
+      }
+      // When there is no owner, notify_for_property already fans out to admin+finance.
+      if (ownerId) {
+        try {
+          await notifyAdmins({
+            type: 'payment_submitted',
+            title: notifyTitle,
+            body: notifyBody,
+            entityType: 'payment',
+            entityId: data.id,
+          });
+        } catch (notifyErr) {
+          console.error('Notify finance/admin of payment error:', notifyErr);
+        }
       }
     }
 
@@ -269,24 +308,31 @@ export default function RentPaymentScreen() {
         proofUrl = await uploadPaymentProof(user.id, proof);
       }
 
-      const result = await insertPayment({
-        method: paymentMethod,
-        reference: refCode.trim().toUpperCase(),
-        proofUrl,
-        auditDescription: `Tenant submitted ${paymentMethod} rent payment reference for verification.`,
-      });
+      try {
+        const result = await insertPayment({
+          method: paymentMethod,
+          reference: refCode.trim().toUpperCase(),
+          proofUrl,
+          auditDescription: `Tenant submitted ${paymentMethod} rent payment reference for verification.`,
+        });
 
-      await refreshBalance(activeLease);
+        await refreshBalance(activeLease);
 
-      Alert.alert(
-        'Submission Received',
-        activeLease.status === 'pending'
-          ? `Payment of ${formatPrice(parseFloat(amount))} (ref ${result.reference}) was submitted. Once verified, your lease will become active.`
-          : `Payment of ${formatPrice(parseFloat(amount))} (ref ${result.reference}) was submitted for verification.`,
-      );
-      setRefCode('');
-      setProof(null);
-      setProofPreviewUri(null);
+        Alert.alert(
+          'Submission Received',
+          activeLease.status === 'pending'
+            ? `Payment of ${formatPrice(parseFloat(amount))} (ref ${result.reference}) was submitted. Once verified, your lease will become active.`
+            : `Payment of ${formatPrice(parseFloat(amount))} (ref ${result.reference}) was submitted for verification.`,
+        );
+        setRefCode('');
+        setProof(null);
+        setProofPreviewUri(null);
+      } catch (insertErr) {
+        if (proofUrl) {
+          await deletePaymentProof(proofUrl).catch(() => {});
+        }
+        throw insertErr;
+      }
     } catch (err: any) {
       console.error('Submit payment reference error:', err);
       Alert.alert('Submission Failed', err.message || 'Failed to submit payment details.');
@@ -309,6 +355,8 @@ export default function RentPaymentScreen() {
       : paymentMethod === 'bank'
         ? 'Transfer to the IBSA bank account, then enter the bank slip or transfer reference below. Attach a slip photo if you have one.'
         : 'After paying cash to an authorized collector, enter the receipt number below and attach a photo of the receipt if available.';
+
+  const isPaidUp = activeLease?.status === 'active' && outstanding <= 0;
 
   return (
     <KeyboardAvoidingView
@@ -339,7 +387,9 @@ export default function RentPaymentScreen() {
           </View>
         ) : (
           <View style={styles.card}>
-            <Text style={styles.cardTitle}>Submit Rent Payment Details</Text>
+            <Text style={styles.cardTitle}>
+              {isPaidUp ? 'Rent Payment Status' : 'Submit Rent Payment Details'}
+            </Text>
             <Text style={styles.propertyHeader}>Leased Property: {activeLease.properties?.title}</Text>
             {recentPaymentNote ? (
               <View style={styles.focusNote}>
@@ -350,6 +400,14 @@ export default function RentPaymentScreen() {
               <Text style={styles.pendingHint}>
                 This lease is pending payment confirmation. Submit M-Pesa, bank, or cash details for your landlord to verify before the lease activates.
               </Text>
+            ) : null}
+            {isPaidUp ? (
+              <View style={styles.successNote}>
+                <CheckCircle size={18} color="#10B981" style={styles.successIcon} />
+                <Text style={styles.successNoteText}>
+                  Your lease is active and current charges are fully paid. You can submit again when the next rent is due.
+                </Text>
+              </View>
             ) : null}
 
             <View style={styles.balanceBox}>
@@ -363,7 +421,19 @@ export default function RentPaymentScreen() {
               </View>
               {depositAmount > 0 ? (
                 <View style={styles.balanceRow}>
-                  <Text style={styles.balanceLabel}>Deposit ({depositStatus})</Text>
+                  <Text style={styles.balanceLabel}>
+                    Deposit (
+                    {depositStatus === 'held'
+                      ? 'held for damage'
+                      : depositStatus === 'refunded'
+                        ? 'refunded'
+                        : depositStatus === 'partial'
+                          ? 'partial / damage deducted'
+                          : depositStatus === 'due'
+                            ? 'due'
+                            : depositStatus}
+                    )
+                  </Text>
                   <Text style={styles.balanceValue}>{formatPrice(depositAmount)}</Text>
                 </View>
               ) : null}
@@ -375,103 +445,115 @@ export default function RentPaymentScreen() {
               </View>
             </View>
 
-            <View style={styles.inputGroup}>
-              <Text style={styles.label}>Select Payment Method</Text>
-              <View style={styles.methodList}>
-                {PAYMENT_METHODS.map((m) => (
-                  <TouchableOpacity
-                    key={m.value}
-                    style={[styles.methodBtn, paymentMethod === m.value && styles.methodBtnActive]}
-                    onPress={() => setPaymentMethod(m.value as 'mpesa' | 'bank' | 'cash')}
-                  >
-                    <Text style={[styles.methodText, paymentMethod === m.value && styles.methodTextActive]}>
-                      {m.label}
-                    </Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
-              <Text style={styles.methodHint}>{methodHint}</Text>
-            </View>
+            {!isPaidUp ? (
+              <>
+                <View style={styles.inputGroup}>
+                  <Text style={styles.label}>Select Payment Method</Text>
+                  <View style={styles.methodList}>
+                    {PAYMENT_METHODS.map((m) => (
+                      <TouchableOpacity
+                        key={m.value}
+                        style={[styles.methodBtn, paymentMethod === m.value && styles.methodBtnActive]}
+                        onPress={() => setPaymentMethod(m.value as 'mpesa' | 'bank' | 'cash')}
+                      >
+                        <Text style={[styles.methodText, paymentMethod === m.value && styles.methodTextActive]}>
+                          {m.label}
+                        </Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                  <Text style={styles.methodHint}>{methodHint}</Text>
+                </View>
 
-            <View style={styles.inputGroup}>
-              <Text style={styles.label}>Amount Paid (KES)</Text>
-              <Text style={styles.amountHint}>
-                {outstanding > 0
-                  ? `Prefilled with outstanding balance (${formatPrice(outstanding)}). You can change it for a partial payment.`
-                  : 'This lease is fully paid. Enter an amount only if submitting an extra payment.'}
-              </Text>
-              <View style={styles.inputWrapper}>
-                <DollarSign size={18} color="#94A3B8" style={styles.inputIcon} />
-                <TextInput
-                  style={styles.input}
-                  placeholder="e.g. 25000"
-                  placeholderTextColor="#999"
-                  value={amount}
-                  onChangeText={setAmount}
-                  keyboardType="numeric"
-                />
-              </View>
-            </View>
+                <View style={styles.inputGroup}>
+                  <Text style={styles.label}>Amount Paid (KES)</Text>
+                  <Text style={styles.amountHint}>
+                    {outstanding > 0
+                      ? `Prefilled with outstanding balance (${formatPrice(outstanding)}). You can change it for a partial payment.`
+                      : 'This lease is fully paid. Enter an amount only if submitting an extra payment.'}
+                  </Text>
+                  <View style={styles.inputWrapper}>
+                    <DollarSign size={18} color="#94A3B8" style={styles.inputIcon} />
+                    <TextInput
+                      style={styles.input}
+                      placeholder="e.g. 25000"
+                      placeholderTextColor="#999"
+                      value={amount}
+                      onChangeText={setAmount}
+                      keyboardType="numeric"
+                    />
+                  </View>
+                </View>
 
-            <View style={styles.inputGroup}>
-              <Text style={styles.label}>Transaction Reference Code</Text>
-              <View style={styles.inputWrapper}>
-                <Key size={18} color="#94A3B8" style={styles.inputIcon} />
-                <TextInput
-                  style={styles.input}
-                  placeholder={
-                    paymentMethod === 'mpesa'
-                      ? 'e.g. M-Pesa confirmation code'
-                      : 'e.g. bank slip / receipt number'
-                  }
-                  placeholderTextColor="#999"
-                  value={refCode}
-                  onChangeText={setRefCode}
-                  autoCapitalize="characters"
-                />
-              </View>
-            </View>
+                <View style={styles.inputGroup}>
+                  <View style={styles.labelRow}>
+                    <Text style={[styles.label, styles.labelInRow]}>Transaction Reference Code</Text>
+                    <TouchableOpacity onPress={() => setRefCode(generateFallbackReference())}>
+                      <Text style={styles.generateBtnText}>Generate</Text>
+                    </TouchableOpacity>
+                  </View>
+                  <View style={styles.inputWrapper}>
+                    <Key size={18} color="#94A3B8" style={styles.inputIcon} />
+                    <TextInput
+                      style={styles.input}
+                      placeholder={
+                        paymentMethod === 'mpesa'
+                          ? 'e.g. M-Pesa confirmation code'
+                          : 'e.g. bank slip / receipt number'
+                      }
+                      placeholderTextColor="#999"
+                      value={refCode}
+                      onChangeText={setRefCode}
+                      autoCapitalize="characters"
+                    />
+                  </View>
+                  <Text style={styles.refHint}>
+                    Auto-filled for demo — replace with your real M-Pesa code if you paid outside the app.
+                  </Text>
+                </View>
 
-            <View style={styles.inputGroup}>
-              <Text style={styles.label}>Payment Proof (optional)</Text>
-              <View style={styles.proofRow}>
-                <TouchableOpacity style={styles.proofBtn} onPress={handlePickProofImage}>
-                  <Paperclip size={14} color="#38BDF8" />
-                  <Text style={styles.proofBtnText}>Photo</Text>
+                <View style={styles.inputGroup}>
+                  <Text style={styles.label}>Payment Proof (optional)</Text>
+                  <View style={styles.proofRow}>
+                    <TouchableOpacity style={styles.proofBtn} onPress={handlePickProofImage}>
+                      <Paperclip size={14} color="#38BDF8" />
+                      <Text style={styles.proofBtnText}>Photo</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity style={styles.proofBtn} onPress={handlePickProofDoc}>
+                      <Paperclip size={14} color="#38BDF8" />
+                      <Text style={styles.proofBtnText}>PDF / File</Text>
+                    </TouchableOpacity>
+                    {proof ? (
+                      <TouchableOpacity
+                        style={styles.proofClear}
+                        onPress={() => {
+                          setProof(null);
+                          setProofPreviewUri(null);
+                        }}
+                      >
+                        <X size={14} color="#EF4444" />
+                      </TouchableOpacity>
+                    ) : null}
+                  </View>
+                  {proofPreviewUri ? (
+                    <Image source={{ uri: proofPreviewUri }} style={styles.proofPreview} />
+                  ) : proof && 'name' in proof ? (
+                    <Text style={styles.proofName}>{proof.name}</Text>
+                  ) : null}
+                </View>
+
+                <TouchableOpacity style={styles.submitBtn} onPress={handleSubmit} disabled={submitting}>
+                  {submitting ? (
+                    <ActivityIndicator color="#0F172A" />
+                  ) : (
+                    <>
+                      <Send size={18} color="#0F172A" style={styles.btnIcon} />
+                      <Text style={styles.submitBtnText}>Submit for Verification</Text>
+                    </>
+                  )}
                 </TouchableOpacity>
-                <TouchableOpacity style={styles.proofBtn} onPress={handlePickProofDoc}>
-                  <Paperclip size={14} color="#38BDF8" />
-                  <Text style={styles.proofBtnText}>PDF / File</Text>
-                </TouchableOpacity>
-                {proof ? (
-                  <TouchableOpacity
-                    style={styles.proofClear}
-                    onPress={() => {
-                      setProof(null);
-                      setProofPreviewUri(null);
-                    }}
-                  >
-                    <X size={14} color="#EF4444" />
-                  </TouchableOpacity>
-                ) : null}
-              </View>
-              {proofPreviewUri ? (
-                <Image source={{ uri: proofPreviewUri }} style={styles.proofPreview} />
-              ) : proof && 'name' in proof ? (
-                <Text style={styles.proofName}>{proof.name}</Text>
-              ) : null}
-            </View>
-
-            <TouchableOpacity style={styles.submitBtn} onPress={handleSubmit} disabled={submitting}>
-              {submitting ? (
-                <ActivityIndicator color="#0F172A" />
-              ) : (
-                <>
-                  <Send size={18} color="#0F172A" style={styles.btnIcon} />
-                  <Text style={styles.submitBtnText}>Submit for Verification</Text>
-                </>
-              )}
-            </TouchableOpacity>
+              </>
+            ) : null}
           </View>
         )}
       </ScrollView>
@@ -493,6 +575,17 @@ const styles = StyleSheet.create({
   cardTitle: { fontSize: 18, fontWeight: 'bold', color: '#F8FAFC', marginBottom: 6, textAlign: 'center' },
   propertyHeader: { fontSize: 14, color: '#94A3B8', textAlign: 'center', marginBottom: 12 },
   pendingHint: { color: '#EAB308', fontSize: 13, lineHeight: 18, marginBottom: 12, textAlign: 'center' },
+  successNote: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    backgroundColor: 'rgba(16, 185, 129, 0.12)',
+    borderRadius: 8,
+    padding: 12,
+    marginBottom: 12,
+    gap: 10,
+  },
+  successIcon: { marginTop: 1 },
+  successNoteText: { flex: 1, color: '#10B981', fontSize: 13, lineHeight: 18 },
   focusNote: {
     backgroundColor: 'rgba(56, 189, 248, 0.12)',
     borderRadius: 8,
@@ -514,6 +607,15 @@ const styles = StyleSheet.create({
   balanceValue: { color: '#F8FAFC', fontSize: 14, fontWeight: '700' },
   inputGroup: { marginBottom: 16 },
   label: { color: '#CBD5E1', fontSize: 13, fontWeight: '600', marginBottom: 8 },
+  labelRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 8,
+  },
+  labelInRow: { marginBottom: 0 },
+  generateBtnText: { color: '#38BDF8', fontSize: 13, fontWeight: '700' },
+  refHint: { color: '#64748B', fontSize: 12, lineHeight: 17, marginTop: 8 },
   methodList: { gap: 8 },
   methodBtn: {
     borderWidth: 1,

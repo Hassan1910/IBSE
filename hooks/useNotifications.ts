@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useFocusEffect } from 'expo-router';
 import { useUser } from '@clerk/clerk-expo';
+import { useQueryClient } from '@tanstack/react-query';
 import { getUnreadCount } from '../lib/notifications';
+import { subscribeNotificationMoneySync } from '../lib/notificationMoneySync';
 
 export function useNotifications() {
   const { user } = useUser();
+  const queryClient = useQueryClient();
   const [unreadCount, setUnreadCount] = useState(0);
   const [loading, setLoading] = useState(true);
 
@@ -31,6 +34,13 @@ export function useNotifications() {
   useEffect(() => {
     refreshUnreadCount();
   }, [refreshUnreadCount]);
+
+  useEffect(() => {
+    if (!user?.id) return;
+    return subscribeNotificationMoneySync(user.id, queryClient, () => {
+      void refreshUnreadCount();
+    });
+  }, [user?.id, queryClient, refreshUnreadCount]);
 
   useFocusEffect(
     useCallback(() => {

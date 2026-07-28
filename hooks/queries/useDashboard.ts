@@ -42,23 +42,98 @@ export async function fetchAdminDashboardQueues(includeOps: boolean) {
     .order('payment_date', { ascending: true })
     .limit(PAGE_SIZE.queues);
 
+  const purchasePromise = supabase
+    .from('property_purchases')
+    .select(
+      `
+      id,
+      property_id,
+      buyer_id,
+      amount,
+      payment_method,
+      reference_code,
+      proof_url,
+      status,
+      notes,
+      verified_by,
+      verified_at,
+      created_at,
+      profiles:buyer_id ( full_name, email, phone ),
+      properties ( title, location, price, status ),
+      purchase_documents ( id, purchase_id, doc_type, title, file_url, uploaded_by, created_at )
+    `
+    )
+    .eq('status', 'pending')
+    .order('created_at', { ascending: true })
+    .limit(PAGE_SIZE.queues);
+
+  const depositSelect = `
+      id,
+      property_id,
+      client_id,
+      booking_id,
+      lease_id,
+      amount,
+      payment_method,
+      reference_code,
+      proof_url,
+      status,
+      notes,
+      verified_by,
+      verified_at,
+      created_at,
+      profiles:client_id ( full_name, email, phone ),
+      properties ( title, location, price, status, type, owner_id )
+    `;
+
+  const pendingDepositPromise = supabase
+    .from('deposit_payments')
+    .select(depositSelect)
+    .eq('status', 'pending')
+    .order('created_at', { ascending: true })
+    .limit(PAGE_SIZE.queues);
+
+  /** Verified deposits not yet linked to a lease — admin can Create Lease without a viewing. */
+  const readyDepositPromise = supabase
+    .from('deposit_payments')
+    .select(depositSelect)
+    .eq('status', 'verified')
+    .is('lease_id', null)
+    .order('verified_at', { ascending: true })
+    .limit(PAGE_SIZE.queues);
+
   if (!includeOps) {
-    const { data, error } = await payPromise;
-    if (error) throw error;
+    // Finance needs pending (verify) + verified/unlinked (release) deposits.
+    const [payRes, purchaseRes, pendingDepRes, readyDepRes] = await Promise.all([
+      payPromise,
+      purchasePromise,
+      pendingDepositPromise,
+      readyDepositPromise,
+    ]);
+    if (payRes.error) throw payRes.error;
+    if (purchaseRes.error) throw purchaseRes.error;
+    if (pendingDepRes.error) throw pendingDepRes.error;
+    if (readyDepRes.error) throw readyDepRes.error;
     return {
-      payments: data || [],
+      payments: payRes.data || [],
+      purchases: purchaseRes.data || [],
+      deposits: [...(pendingDepRes.data || []), ...(readyDepRes.data || [])],
       bookings: [] as any[],
       maintenance: [] as any[],
       feedback: [] as any[],
     };
   }
 
-  const [payRes, bookRes, maintRes, feedRes] = await Promise.all([
-    payPromise,
-    supabase
-      .from('bookings')
-      .select(
-        `
+  const [payRes, purchaseRes, pendingDepRes, readyDepRes, bookRes, maintRes, feedRes] =
+    await Promise.all([
+      payPromise,
+      purchasePromise,
+      pendingDepositPromise,
+      readyDepositPromise,
+      supabase
+        .from('bookings')
+        .select(
+          `
         id,
         client_id,
         property_id,
@@ -69,14 +144,14 @@ export async function fetchAdminDashboardQueues(includeOps: boolean) {
         properties ( title, location, type, owner_id, price ),
         profiles ( full_name, email, phone )
       `
-      )
-      .in('status', ['pending', 'approved'])
-      .order('booking_date', { ascending: true })
-      .limit(PAGE_SIZE.queues),
-    supabase
-      .from('maintenance_requests')
-      .select(
-        `
+        )
+        .in('status', ['pending', 'approved'])
+        .order('booking_date', { ascending: true })
+        .limit(PAGE_SIZE.queues),
+      supabase
+        .from('maintenance_requests')
+        .select(
+          `
         id,
         tenant_id,
         title,
@@ -88,33 +163,40 @@ export async function fetchAdminDashboardQueues(includeOps: boolean) {
         properties ( title ),
         profiles ( full_name )
       `
-      )
-      .neq('status', 'resolved')
-      .order('created_at', { ascending: false })
-      .limit(PAGE_SIZE.queues),
-    supabase
-      .from('feedback')
-      .select(
-        `
+        )
+        .neq('status', 'resolved')
+        .order('created_at', { ascending: false })
+        .limit(PAGE_SIZE.queues),
+      supabase
+        .from('feedback')
+        .select(
+          `
         id,
         type,
         message,
         created_at,
         profiles!feedback_user_id_fkey ( full_name, email )
       `
-      )
-      .eq('status', 'open')
-      .order('created_at', { ascending: false })
-      .limit(PAGE_SIZE.queues),
-  ]);
+        )
+        .eq('status', 'open')
+        .order('created_at', { ascending: false })
+        .limit(PAGE_SIZE.queues),
+    ]);
 
   if (payRes.error) throw payRes.error;
+  if (purchaseRes.error) throw purchaseRes.error;
+  if (pendingDepRes.error) throw pendingDepRes.error;
+  if (readyDepRes.error) throw readyDepRes.error;
   if (bookRes.error) throw bookRes.error;
   if (maintRes.error) throw maintRes.error;
   if (feedRes.error) throw feedRes.error;
 
+  const deposits = [...(pendingDepRes.data || []), ...(readyDepRes.data || [])];
+
   return {
     payments: payRes.data || [],
+    purchases: purchaseRes.data || [],
+    deposits,
     bookings: bookRes.data || [],
     maintenance: maintRes.data || [],
     feedback: feedRes.data || [],

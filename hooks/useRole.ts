@@ -1,35 +1,41 @@
 import { useUser, useAuth } from '@clerk/clerk-expo';
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { AppState, type AppStateStatus } from 'react-native';
 import { supabase, setSupabaseToken } from '../lib/supabase';
 
 export type UserRole = 'admin' | 'finance' | 'tenant' | 'client' | 'landlord';
+export type AccountStatus = 'pending' | 'approved' | 'rejected';
 
 export function useRole() {
   const { user, isLoaded: isUserLoaded } = useUser();
   const { getToken, isLoaded: isAuthLoaded } = useAuth();
   const [role, setRole] = useState<UserRole | null>(null);
+  const [accountStatus, setAccountStatus] = useState<AccountStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [refreshNonce, setRefreshNonce] = useState(0);
 
   // Stable refs to avoid re-render loops
   const getTokenRef = useRef(getToken);
   getTokenRef.current = getToken;
   const isFetchingRef = useRef(false);
-  const lastUserIdRef = useRef<string | null>(null);
+  const lastFetchKeyRef = useRef<string | null>(null);
+  const missingProfileRetriesRef = useRef(0);
 
   useEffect(() => {
     if (!isUserLoaded || !isAuthLoaded) return;
 
     if (!user) {
-      // Only update state if it actually changed
       setRole((prev) => (prev === null ? prev : null));
+      setAccountStatus((prev) => (prev === null ? prev : null));
       setLoading((prev) => (prev === false ? prev : false));
-      lastUserIdRef.current = null;
+      lastFetchKeyRef.current = null;
+      missingProfileRetriesRef.current = 0;
       return;
     }
 
-    // Skip if we already fetched for this user
-    if (isFetchingRef.current || lastUserIdRef.current === user.id) return;
+    const fetchKey = `${user.id}:${refreshNonce}`;
+    if (isFetchingRef.current || lastFetchKeyRef.current === fetchKey) return;
 
     let cancelled = false;
     isFetchingRef.current = true;
@@ -38,12 +44,10 @@ export function useRole() {
       try {
         setLoading(true);
 
-        // Get Clerk token for Supabase
         let token: string | null = null;
         try {
           token = await getTokenRef.current({ template: 'supabase' });
         } catch {
-          // Template doesn't exist yet — use default Clerk session token
           try {
             token = await getTokenRef.current();
           } catch {
@@ -54,10 +58,9 @@ export function useRole() {
         if (cancelled) return;
         setSupabaseToken(token);
 
-        // Query profiles table
         const { data, error: sbError } = await supabase
           .from('profiles')
-          .select('role')
+          .select('role, account_status')
           .eq('id', user!.id)
           .single();
 
@@ -65,28 +68,38 @@ export function useRole() {
 
         if (sbError) {
           if (sbError.code === 'PGRST116') {
-            // Profile not created yet
+            // Profile may still be inserting during signup/login — retry with backoff.
             setRole(null);
+            setAccountStatus(null);
+            missingProfileRetriesRef.current += 1;
+            const attempt = missingProfileRetriesRef.current;
+            const delay = attempt <= 6 ? 400 : Math.min(3000 + (attempt - 6) * 1000, 15000);
+            setTimeout(() => {
+              if (!cancelled) setRefreshNonce((n) => n + 1);
+            }, delay);
           } else if (sbError.code === 'PGRST301') {
-            // JWT not configured in Supabase
             setRole(null);
+            setAccountStatus(null);
+            lastFetchKeyRef.current = fetchKey;
           } else {
             console.error('[useRole] Supabase error:', sbError);
             setError(sbError.message);
+            lastFetchKeyRef.current = fetchKey;
           }
         } else if (data) {
+          missingProfileRetriesRef.current = 0;
           setRole(data.role as UserRole);
+          setAccountStatus((data.account_status as AccountStatus) || 'approved');
           setError(null);
-        }
-
-        if (!cancelled) {
-          lastUserIdRef.current = user!.id;
+          lastFetchKeyRef.current = fetchKey;
         }
       } catch (err: any) {
         if (!cancelled) {
           console.error('[useRole] Unhandled exception:', err);
           setError(err.message || 'Failed to determine user role');
           setRole(null);
+          setAccountStatus(null);
+          lastFetchKeyRef.current = fetchKey;
         }
       } finally {
         if (!cancelled) {
@@ -102,17 +115,30 @@ export function useRole() {
       cancelled = true;
       isFetchingRef.current = false;
     };
-    // Only re-run when user identity or auth loaded state changes
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.id, isUserLoaded, isAuthLoaded]);
+  }, [user?.id, isUserLoaded, isAuthLoaded, refreshNonce]);
 
-  // Manual refresh (e.g. after profile creation)
+  // Retry when app returns to foreground if profile never resolved.
+  useEffect(() => {
+    if (!user?.id) return;
+    const onChange = (state: AppStateStatus) => {
+      if (state === 'active' && !role) {
+        isFetchingRef.current = false;
+        missingProfileRetriesRef.current = 0;
+        setRefreshNonce((n) => n + 1);
+      }
+    };
+    const sub = AppState.addEventListener('change', onChange);
+    return () => sub.remove();
+  }, [user?.id, role]);
+
   const refresh = useCallback(() => {
-    lastUserIdRef.current = null; // Reset so effect will re-fetch
     isFetchingRef.current = false;
-    // Force a re-render by toggling loading
+    missingProfileRetriesRef.current = 0;
+    lastFetchKeyRef.current = null;
     setLoading(true);
+    setRefreshNonce((n) => n + 1);
   }, []);
 
-  return { role, loading, error, refresh };
+  return { role, accountStatus, loading, error, refresh };
 }

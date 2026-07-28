@@ -22,6 +22,7 @@ import {
   leaseAssignErrorMessage,
   promoteClientToTenant,
 } from '../../lib/leases';
+import { terminateLeaseWithDeposit } from '../../lib/depositPayments';
 import { pickDocument, uploadContract, uploadLeaseDocumentFile } from '../../lib/storage';
 import DatePickerModal from '../../components/DatePickerModal';
 import { Plus, X, FileText, Calendar, User as UserIcon, RefreshCw, Ban, Link as LinkIcon, Upload, MessageSquare } from 'lucide-react-native';
@@ -328,7 +329,15 @@ export default function LandlordAgreements() {
           end_date: renewEndDate,
           rent_amount: renewLease.rent_amount,
           deposit_amount: renewLease.deposit_amount || 0,
-          deposit_status: (renewLease.deposit_amount || 0) > 0 ? 'due' : 'none',
+          deposit_status: (() => {
+            const amount = renewLease.deposit_amount || 0;
+            if (amount <= 0) return 'none';
+            const prior = renewLease.deposit_status;
+            // Carry held; do not re-charge after settle/refund.
+            if (prior === 'held') return 'held';
+            if (prior === 'partial' || prior === 'refunded') return 'none';
+            return 'due';
+          })(),
           terms: renewLease.terms,
           contract_url: renewLease.contract_url,
           status: 'pending',
@@ -359,57 +368,68 @@ export default function LandlordAgreements() {
   };
 
   const handleTerminate = (lease: Lease) => {
+    const hasHeldDeposit =
+      Number(lease.deposit_amount || 0) > 0 &&
+      (lease.deposit_status === 'held' || lease.deposit_status === 'partial');
+
+    const runTerminate = async (settle?: 'refunded' | 'partial') => {
+      try {
+        await terminateLeaseWithDeposit(
+          lease.id,
+          settle ?? null,
+          settle === 'refunded'
+            ? 'Full refund on tenancy end'
+            : settle === 'partial'
+              ? 'Damage deduction on tenancy end'
+              : undefined
+        );
+
+        // Occupancy sync + settle_deposit_payment_on_lease_end handle property/unit/deposit rows.
+        // Do not force properties.status = available here — that can disagree with leftover holds.
+
+        logAudit({
+          actorId: user?.id || '',
+          action: 'update',
+          entityType: 'lease',
+          entityId: lease.id,
+          description: settle
+            ? `Terminated rental agreement; deposit ${settle}`
+            : 'Terminated rental agreement',
+        });
+        Alert.alert('Success', 'Agreement terminated.');
+        fetchLeases();
+      } catch (err) {
+        console.error('Terminate lease error:', err);
+        Alert.alert('Error', 'Failed to terminate agreement.');
+      }
+    };
+
+    if (hasHeldDeposit) {
+      Alert.alert(
+        'Terminate Agreement',
+        'Settle the security deposit before ending this tenancy.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Refund full deposit',
+            onPress: () => void runTerminate('refunded'),
+          },
+          {
+            text: 'Deduct for damage',
+            style: 'destructive',
+            onPress: () => void runTerminate('partial'),
+          },
+        ]
+      );
+      return;
+    }
+
     Alert.alert('Terminate Agreement', 'Terminate this rental agreement? The unit and property will be freed.', [
       { text: 'Cancel', style: 'cancel' },
       {
         text: 'Terminate',
         style: 'destructive',
-        onPress: async () => {
-          try {
-            // DB trigger syncs unit vacant + property available from active leases.
-            // Client updates below are a belt-and-suspenders fallback if the
-            // migration is not applied yet.
-            const { error } = await supabase.from('leases').update({ status: 'terminated' }).eq('id', lease.id);
-            if (error) throw error;
-
-            const { count: otherActive } = await supabase
-              .from('leases')
-              .select('id', { count: 'exact', head: true })
-              .eq('property_id', lease.property_id)
-              .eq('status', 'active');
-
-            if (!otherActive) {
-              const { error: propError } = await supabase
-                .from('properties')
-                .update({ status: 'available' })
-                .eq('id', lease.property_id);
-              if (propError) console.warn('Property free error:', propError);
-            }
-
-            if (lease.unit_id) {
-              const { error: unitError } = await supabase
-                .from('units')
-                .update({ status: 'vacant', tenant_id: null })
-                .eq('id', lease.unit_id);
-              if (unitError) console.warn('Unit free error:', unitError);
-            } else if (lease.tenant_id) {
-              // Lease may not have linked a unit — free any unit still assigned to this tenant on the property.
-              const { error: unitError } = await supabase
-                .from('units')
-                .update({ status: 'vacant', tenant_id: null })
-                .eq('property_id', lease.property_id)
-                .eq('tenant_id', lease.tenant_id);
-              if (unitError) console.warn('Unit free by tenant error:', unitError);
-            }
-
-            logAudit({ actorId: user?.id || '', action: 'update', entityType: 'lease', entityId: lease.id, description: 'Terminated rental agreement' });
-            Alert.alert('Success', 'Agreement terminated.');
-            fetchLeases();
-          } catch (err) {
-            console.error('Terminate lease error:', err);
-            Alert.alert('Error', 'Failed to terminate agreement.');
-          }
-        },
+        onPress: () => void runTerminate(),
       },
     ]);
   };

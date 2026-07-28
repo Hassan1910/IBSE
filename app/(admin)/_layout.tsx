@@ -5,6 +5,7 @@ import { Drawer } from 'expo-router/drawer';
 import { DrawerToggleButton } from '@react-navigation/drawer';
 import { usePathname, useRouter } from 'expo-router';
 import AdminDrawerContent from '../../components/admin/AdminDrawerContent';
+import NotificationBell from '../../components/NotificationBell';
 import { adminTheme } from '../../constants/adminTheme';
 import { ADMIN_NAV_ITEMS, getNavItemByName } from '../../lib/adminNav';
 import { useRole } from '../../hooks/useRole';
@@ -57,6 +58,7 @@ export default function AdminLayout() {
           headerLeft: isWideWeb
             ? () => null
             : () => <DrawerToggleButton tintColor={adminTheme.colors.text} />,
+          headerRight: () => <NotificationBell href="/(admin)/notifications" />,
           drawerItemStyle: hiddenDrawerItem,
         }}
       >

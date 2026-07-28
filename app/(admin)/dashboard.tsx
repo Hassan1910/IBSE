@@ -14,7 +14,22 @@ import { supabase } from '../../lib/supabase';
 import { useUser } from '@clerk/clerk-expo';
 import { useRole } from '../../hooks/useRole';
 import { notifyUser } from '../../lib/notifications';
+import { countPendingAccounts } from '../../lib/accountApproval';
 import { generateAndAttachReceipt } from '../../lib/receipts';
+import {
+  completePurchase,
+  rejectPurchase,
+  uploadPurchaseDocument,
+  type PendingPurchaseQueueItem,
+  type PurchaseDocType,
+} from '../../lib/purchases';
+import {
+  completeDepositPayment,
+  rejectDepositPayment,
+  releaseDepositPayment,
+  type PendingDepositQueueItem,
+} from '../../lib/depositPayments';
+import { pickDocument, createSignedStorageUrl } from '../../lib/storage';
 import MaterialsUsedModal from '../../components/MaterialsUsedModal';
 import NotificationBell from '../../components/NotificationBell';
 import StatCard from '../../components/admin/StatCard';
@@ -34,6 +49,7 @@ import {
 } from '../../hooks/queries/useDashboard';
 import { queryKeys } from '../../hooks/queries/keys';
 import { LIST_PERF } from '../../lib/queryClient';
+import { useAudit } from '../../hooks/useAudit';
 import {
   CreditCard,
   User,
@@ -50,8 +66,13 @@ import {
   Wallet,
   FileText as LeaseIcon,
   FilePlus,
+  ShoppingBag,
+  ExternalLink,
+  Users,
 } from 'lucide-react-native';
-import ConvertBookingToLeaseModal from '../../components/ConvertBookingToLeaseModal';
+import ConvertBookingToLeaseModal, {
+  type LeaseConversionSource,
+} from '../../components/ConvertBookingToLeaseModal';
 
 function getGreeting(): string {
   const hour = new Date().getHours();
@@ -177,26 +198,37 @@ interface Feedback {
   };
 }
 
-type DashboardTab = 'payments' | 'bookings' | 'maintenance' | 'feedback';
+type DashboardTab = 'payments' | 'purchases' | 'deposits' | 'bookings' | 'maintenance' | 'feedback';
+type DashboardSection = 'money' | 'ops';
+
+const MONEY_TABS: DashboardTab[] = ['payments', 'purchases', 'deposits'];
+const OPS_TABS: DashboardTab[] = ['bookings', 'maintenance', 'feedback'];
+
+function sectionForTab(tab: DashboardTab): DashboardSection {
+  return MONEY_TABS.includes(tab) ? 'money' : 'ops';
+}
+
+function isDepositReadyForLease(item: PendingDepositQueueItem): boolean {
+  return item.status === 'verified' && !item.lease_id;
+}
 
 export default function AdminDashboard() {
   const { user } = useUser();
   const { role, loading: roleLoading } = useRole();
+  const { log } = useAudit();
   const router = useRouter();
   const queryClient = useQueryClient();
   const { tab: tabParam, id: focusId } = useLocalSearchParams<{ tab?: string; id?: string }>();
-  // Finance staff only handle payment verification; operational queues
+  // Finance staff handle payment/purchase/deposit verification; operational queues
   // (bookings, maintenance, feedback) are hidden from them.
   const isFinance = role === 'finance';
-  const availableTabs: DashboardTab[] = useMemo(
-    () => (isFinance ? ['payments'] : ['payments', 'bookings', 'maintenance', 'feedback']),
-    [isFinance]
-  );
 
+  const [activeSection, setActiveSection] = useState<DashboardSection>('money');
   const [activeTab, setActiveTab] = useState<DashboardTab>('payments');
   const [materialsRequest, setMaterialsRequest] = useState<MaintenanceRequest | null>(null);
   const [highlightedId, setHighlightedId] = useState<string | null>(null);
-  const [convertBooking, setConvertBooking] = useState<Booking | null>(null);
+  const [convertLeaseSource, setConvertLeaseSource] = useState<LeaseConversionSource | null>(null);
+  const [pendingAccountCount, setPendingAccountCount] = useState(0);
   const listRef = useRef<FlatList>(null);
 
   const roleReady = !roleLoading && !!role;
@@ -204,10 +236,47 @@ export default function AdminDashboard() {
   const queuesQuery = useAdminDashboardQueues(!isFinance, roleReady);
 
   const payments = (queuesQuery.data?.payments as unknown as Payment[]) || [];
+  const purchases = (queuesQuery.data?.purchases as unknown as PendingPurchaseQueueItem[]) || [];
+  const deposits = useMemo(() => {
+    const items = (queuesQuery.data?.deposits as unknown as PendingDepositQueueItem[]) || [];
+    return [...items].sort((a, b) => {
+      const aReady = isDepositReadyForLease(a) ? 1 : 0;
+      const bReady = isDepositReadyForLease(b) ? 1 : 0;
+      if (aReady !== bReady) return aReady - bReady; // pending first
+      return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+    });
+  }, [queuesQuery.data?.deposits]);
   const bookings = (queuesQuery.data?.bookings as unknown as Booking[]) || [];
   const maintenanceRequests = (queuesQuery.data?.maintenance as unknown as MaintenanceRequest[]) || [];
   const feedback = (queuesQuery.data?.feedback as unknown as Feedback[]) || [];
   const loading = roleLoading || (statsQuery.isLoading && !statsQuery.data) || (queuesQuery.isLoading && !queuesQuery.data);
+
+  const queueCounts = useMemo(
+    () => ({
+      payments: payments.length,
+      purchases: purchases.length,
+      deposits: deposits.length,
+      bookings: bookings.length,
+      maintenance: maintenanceRequests.length,
+      feedback: feedback.length,
+    }),
+    [payments.length, purchases.length, deposits.length, bookings.length, maintenanceRequests.length, feedback.length]
+  );
+
+  const moneyPendingCount =
+    queueCounts.payments + queueCounts.purchases + queueCounts.deposits;
+  const opsPendingCount =
+    queueCounts.bookings + queueCounts.maintenance + queueCounts.feedback;
+
+  const availableTabs: DashboardTab[] = useMemo(() => {
+    if (isFinance) return MONEY_TABS;
+    return activeSection === 'money' ? MONEY_TABS : OPS_TABS;
+  }, [isFinance, activeSection]);
+
+  const allAllowedTabs: DashboardTab[] = useMemo(
+    () => (isFinance ? MONEY_TABS : [...MONEY_TABS, ...OPS_TABS]),
+    [isFinance]
+  );
 
   const stats = useMemo(
     () => ({
@@ -219,12 +288,62 @@ export default function AdminDashboard() {
     [statsQuery.data]
   );
 
+  const selectHighestPendingTab = useCallback(
+    (tabs: DashboardTab[]): DashboardTab => {
+      let best = tabs[0];
+      let bestCount = -1;
+      for (const tab of tabs) {
+        const count = queueCounts[tab];
+        if (count > bestCount) {
+          best = tab;
+          bestCount = count;
+        }
+      }
+      return best;
+    },
+    [queueCounts]
+  );
+
+  const handleSectionChange = useCallback(
+    (section: DashboardSection) => {
+      setActiveSection(section);
+      const tabs = section === 'money' ? MONEY_TABS : OPS_TABS;
+      setActiveTab((current) => (tabs.includes(current) ? current : selectHighestPendingTab(tabs)));
+    },
+    [selectHighestPendingTab]
+  );
+
+  const handleTabChange = useCallback((tab: DashboardTab) => {
+    setActiveTab(tab);
+    setActiveSection(sectionForTab(tab));
+  }, []);
+
+  const loadPendingAccountCount = useCallback(async () => {
+    if (isFinance) {
+      setPendingAccountCount(0);
+      return;
+    }
+    try {
+      const count = await countPendingAccounts();
+      setPendingAccountCount(count);
+    } catch (err) {
+      console.warn('Failed to load pending account count:', err);
+    }
+  }, [isFinance]);
+
   const fetchDashboardData = useCallback(async () => {
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: queryKeys.adminDashboardStats }),
       queryClient.invalidateQueries({ queryKey: queryKeys.adminDashboardQueues }),
+      queryClient.invalidateQueries({ queryKey: queryKeys.adminFinances }),
+      loadPendingAccountCount(),
     ]);
-  }, [queryClient]);
+  }, [queryClient, loadPendingAccountCount]);
+
+  useEffect(() => {
+    if (!roleReady || isFinance) return;
+    void loadPendingAccountCount();
+  }, [roleReady, isFinance, loadPendingAccountCount]);
 
   useEffect(() => {
     if (statsQuery.isError || queuesQuery.isError) {
@@ -232,24 +351,34 @@ export default function AdminDashboard() {
     }
   }, [statsQuery.isError, queuesQuery.isError]);
 
-  // Keep the active tab valid if the role restricts the available tabs.
+  // Keep section/tab valid if the role restricts available queues.
   useEffect(() => {
-    if (!availableTabs.includes(activeTab)) {
-      setActiveTab(availableTabs[0]);
+    if (isFinance) {
+      setActiveSection('money');
+      if (!MONEY_TABS.includes(activeTab)) {
+        setActiveTab('payments');
+      }
+      return;
+    }
+    if (!allAllowedTabs.includes(activeTab)) {
+      setActiveTab('payments');
+      setActiveSection('money');
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isFinance]);
 
-  // Deep-link from notifications: switch tab, highlight, and scroll into view.
+  // Deep-link from notifications: switch section + tab, highlight, and scroll into view.
   useEffect(() => {
-    if (tabParam && availableTabs.includes(tabParam as DashboardTab)) {
-      setActiveTab(tabParam as DashboardTab);
+    if (tabParam && allAllowedTabs.includes(tabParam as DashboardTab)) {
+      const tab = tabParam as DashboardTab;
+      setActiveTab(tab);
+      setActiveSection(sectionForTab(tab));
     }
     if (focusId) {
       setHighlightedId(focusId);
       router.setParams({ id: undefined, tab: undefined });
     }
-  }, [tabParam, focusId, router, availableTabs]);
+  }, [tabParam, focusId, router, allAllowedTabs]);
 
   useEffect(() => {
     if (!highlightedId || loading) return;
@@ -257,14 +386,20 @@ export default function AdminDashboard() {
       switch (activeTab) {
         case 'payments':
           return payments;
+        case 'purchases':
+          return purchases;
+        case 'deposits':
+          return deposits;
         case 'bookings':
           return bookings;
         case 'maintenance':
           return maintenanceRequests;
         case 'feedback':
           return feedback;
-        default:
-          return [];
+        default: {
+          const _exhaustive: never = activeTab;
+          return _exhaustive;
+        }
       }
     })();
     const index = data.findIndex((item) => item.id === highlightedId);
@@ -277,10 +412,22 @@ export default function AdminDashboard() {
     loading,
     activeTab,
     payments,
+    purchases,
+    deposits,
     bookings,
     maintenanceRequests,
     feedback,
   ]);
+
+  const openPurchaseDoc = async (pathOrUrl: string) => {
+    try {
+      const signed = await createSignedStorageUrl('purchase-documents', pathOrUrl);
+      await Linking.openURL(signed);
+    } catch (err: any) {
+      console.error('Open purchase doc error:', err);
+      Alert.alert('Error', err.message || 'Could not open the document.');
+    }
+  };
 
   const handleVerifyPayment = async (id: string, action: 'verified' | 'failed') => {
     try {
@@ -328,6 +475,198 @@ export default function AdminDashboard() {
     } catch (err: any) {
       console.error('Verify payment error:', err);
       Alert.alert('Error', 'Failed to update payment status.');
+    }
+  };
+
+  const handleVerifyPurchase = async (id: string, action: 'verified' | 'failed') => {
+    const current = purchases.find((p) => p.id === id);
+    if (!current) return;
+
+    try {
+      if (action === 'verified') {
+        await completePurchase(id);
+      } else {
+        await rejectPurchase(id);
+      }
+    } catch (err: any) {
+      console.error('Verify purchase error:', err);
+      Alert.alert('Error', err.message || 'Failed to update purchase status.');
+      return;
+    }
+
+    fetchDashboardData();
+    Alert.alert(
+      'Success',
+      action === 'verified'
+        ? 'Purchase verified. The property is now marked sold.'
+        : 'Purchase marked as failed. Buyer can resubmit.'
+    );
+
+    try {
+      await log({
+        action: 'update',
+        entityType: 'purchase',
+        entityId: id,
+        description:
+          action === 'verified'
+            ? `Verified property purchase ${current.reference_code} and marked listing sold.`
+            : `Rejected property purchase ${current.reference_code}.`,
+      });
+      await notifyUser({
+        userId: current.buyer_id,
+        type: 'purchase_update',
+        title: action === 'verified' ? 'Purchase Verified' : 'Purchase Rejected',
+        body:
+          action === 'verified'
+            ? `Your purchase for ${current.properties?.title || 'the property'} (ref ${current.reference_code}) was verified. The listing is now sold.`
+            : `Your purchase reference ${current.reference_code} was rejected. You can submit again from Explore.`,
+        entityType: 'purchase',
+        entityId: current.id,
+      });
+    } catch (err) {
+      console.error('Post-verify purchase side effects error:', err);
+    }
+  };
+
+  const handleVerifyDeposit = async (id: string, action: 'verified' | 'failed') => {
+    const current = deposits.find((d) => d.id === id);
+    if (!current) return;
+
+    try {
+      if (action === 'verified') {
+        await completeDepositPayment(id);
+      } else {
+        await rejectDepositPayment(id);
+      }
+    } catch (err: any) {
+      console.error('Verify deposit error:', err);
+      Alert.alert('Error', err.message || 'Failed to update deposit status.');
+      return;
+    }
+
+    fetchDashboardData();
+    Alert.alert(
+      'Success',
+      action === 'verified'
+        ? 'Deposit verified. The property is now reserved.'
+        : 'Deposit rejected. Client can resubmit.'
+    );
+
+    try {
+      await log({
+        action: 'update',
+        entityType: 'deposit',
+        entityId: id,
+        description:
+          action === 'verified'
+            ? `Verified booking deposit ${current.reference_code} and reserved listing.`
+            : `Rejected booking deposit ${current.reference_code}.`,
+      });
+      await notifyUser({
+        userId: current.client_id,
+        type: 'deposit_update',
+        title: action === 'verified' ? 'Deposit Verified' : 'Deposit Rejected',
+        body:
+          action === 'verified'
+            ? `Your security deposit for ${current.properties?.title || 'the property'} (ref ${current.reference_code}) was verified. The listing is reserved.`
+            : `Your deposit reference ${current.reference_code} was rejected. You can submit again from Explore.`,
+        entityType: 'deposit',
+        entityId: current.id,
+      });
+      if (action === 'verified' && current.properties?.owner_id) {
+        try {
+          await notifyUser({
+            userId: current.properties.owner_id,
+            type: 'deposit_update',
+            title: 'Deposit Verified on Your Listing',
+            body: `A booking deposit for ${current.properties?.title || 'your property'} (ref ${current.reference_code}) was verified.`,
+            entityType: 'deposit',
+            entityId: current.id,
+          });
+        } catch (ownerNotifyErr) {
+          console.warn('Notify landlord of deposit verify failed:', ownerNotifyErr);
+        }
+      }
+    } catch (err) {
+      console.error('Post-verify deposit side effects error:', err);
+    }
+  };
+
+  const handleReleaseDeposit = async (id: string) => {
+    const current = deposits.find((d) => d.id === id);
+    if (!current) return;
+
+    Alert.alert(
+      'Release reservation',
+      `Release the deposit hold on ${current.properties?.title || 'this property'}? The listing will become available again.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Release',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await releaseDepositPayment(id, 'Reservation released by staff');
+            } catch (err: any) {
+              console.error('Release deposit error:', err);
+              Alert.alert('Error', err.message || 'Failed to release deposit reservation.');
+              return;
+            }
+
+            fetchDashboardData();
+            Alert.alert('Released', 'Deposit reservation released. The listing is available again.');
+
+            try {
+              await log({
+                action: 'update',
+                entityType: 'deposit',
+                entityId: id,
+                description: `Released booking deposit ${current.reference_code} and unreserved listing.`,
+              });
+              await notifyUser({
+                userId: current.client_id,
+                type: 'deposit_update',
+                title: 'Deposit Reservation Released',
+                body: `Your deposit hold for ${current.properties?.title || 'the property'} (ref ${current.reference_code}) was released. You can submit again if the listing is available.`,
+                entityType: 'deposit',
+                entityId: current.id,
+              });
+            } catch (err) {
+              console.error('Post-release deposit side effects error:', err);
+            }
+          },
+        },
+      ]
+    );
+  };
+
+  const handleUploadPurchaseDoc = async (purchase: PendingPurchaseQueueItem) => {
+    if (!user?.id) return;
+    try {
+      const doc = await pickDocument();
+      if (!doc) return;
+
+      const docType: PurchaseDocType = doc.mimeType === 'application/pdf' ? 'sale_agreement' : 'other';
+      await uploadPurchaseDocument({
+        purchaseId: purchase.id,
+        uploadedBy: user.id,
+        docType,
+        title: doc.name,
+        doc,
+      });
+
+      await log({
+        action: 'create',
+        entityType: 'purchase_document',
+        entityId: purchase.id,
+        description: `Uploaded sale document for purchase ${purchase.reference_code}.`,
+      });
+
+      Alert.alert('Uploaded', 'Sale document attached to this purchase.');
+      fetchDashboardData();
+    } catch (err: any) {
+      console.error('Upload purchase doc error:', err);
+      Alert.alert('Error', err.message || 'Failed to upload document.');
     }
   };
 
@@ -458,24 +797,37 @@ export default function AdminDashboard() {
   const tabItems = availableTabs.map((tab) => {
     const labels: Record<DashboardTab, string> = {
       payments: 'Payments',
+      purchases: 'Purchases',
+      deposits: 'Deposits',
       bookings: 'Bookings',
-      maintenance: 'Maint.',
+      maintenance: 'Maintenance',
       feedback: 'Feedback',
     };
     const icons = {
       payments: CreditCard,
+      purchases: ShoppingBag,
+      deposits: Wallet,
       bookings: Calendar,
       maintenance: Wrench,
       feedback: MessageSquare,
     };
-    const counts: Record<DashboardTab, number> = {
-      payments: payments.length,
-      bookings: bookings.length,
-      maintenance: maintenanceRequests.length,
-      feedback: feedback.length,
-    };
-    return { key: tab, label: labels[tab], icon: icons[tab], count: counts[tab] };
+    return { key: tab, label: labels[tab], icon: icons[tab], count: queueCounts[tab] };
   });
+
+  const sectionItems = [
+    {
+      key: 'money',
+      label: 'Money',
+      icon: Wallet,
+      count: moneyPendingCount,
+    },
+    {
+      key: 'ops',
+      label: 'Operations',
+      icon: Wrench,
+      count: opsPendingCount,
+    },
+  ];
 
   const renderPaymentItem = (item: Payment) => (
     <QueueCard
@@ -516,6 +868,197 @@ export default function AdminDashboard() {
       <Text style={styles.dateText}>Submitted: {formatDate(item.payment_date)}</Text>
     </QueueCard>
   );
+
+  const renderPurchaseItem = (item: PendingPurchaseQueueItem) => {
+    const docs = item.purchase_documents || [];
+    return (
+      <QueueCard
+        title={item.properties?.title || 'Property Purchase'}
+        badge={{ label: item.payment_method.toUpperCase() }}
+        accentColor={adminTheme.colors.warning}
+        actions={
+          <>
+            <QueueCardActionButton
+              label="Docs"
+              variant="outline"
+              onPress={() => handleUploadPurchaseDoc(item)}
+              icon={<FilePlus size={16} color={adminTheme.colors.accent} style={styles.btnIcon} />}
+            />
+            <QueueCardActionButton
+              label="Reject"
+              variant="danger"
+              onPress={() => handleVerifyPurchase(item.id, 'failed')}
+              icon={<X size={16} color={adminTheme.colors.danger} style={styles.btnIcon} />}
+            />
+            <QueueCardActionButton
+              label="Verify"
+              variant="primary"
+              onPress={() => handleVerifyPurchase(item.id, 'verified')}
+              icon={<CheckCircle size={16} color={adminTheme.colors.onAccent} style={styles.btnIcon} />}
+            />
+          </>
+        }
+      >
+        <Text style={styles.amount}>{formatPrice(Number(item.amount))}</Text>
+        <Text style={styles.refCode}>
+          Reference: <Text style={styles.boldText}>{item.reference_code}</Text>
+        </Text>
+        <Text style={styles.locationText}>{item.properties?.location}</Text>
+        {item.proof_url ? (
+          <TouchableOpacity
+            style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 6 }}
+            onPress={() => Linking.openURL(item.proof_url!)}
+          >
+            <ExternalLink size={14} color={adminTheme.colors.accent} />
+            <Text style={styles.refCode}>View payment proof</Text>
+          </TouchableOpacity>
+        ) : null}
+        {docs.length > 0 ? (
+          <View style={{ marginTop: 8 }}>
+            {docs.map((doc) => (
+              <TouchableOpacity key={doc.id} onPress={() => void openPurchaseDoc(doc.file_url)}>
+                <Text style={[styles.refCode, { marginTop: 4 }]}>
+                  Doc: {doc.title} ({doc.doc_type})
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        ) : (
+          <Text style={[styles.locationText, { marginTop: 6 }]}>
+            No sale documents yet — use Docs to attach an agreement.
+          </Text>
+        )}
+        <QueueCardDivider />
+        <QueueCardInfoRow icon={<User size={16} color={adminTheme.colors.accent} style={styles.icon} />}>
+          <Text style={styles.clientName}>{item.profiles?.full_name || 'Unknown buyer'}</Text>
+          <Text style={styles.clientEmail}>
+            {item.profiles?.email || 'No email'} | {item.profiles?.phone || 'No phone'}
+          </Text>
+        </QueueCardInfoRow>
+        <Text style={styles.dateText}>Submitted: {formatDate(item.created_at)}</Text>
+      </QueueCard>
+    );
+  };
+
+  const openLeaseFromBooking = (item: Booking) => {
+    setConvertLeaseSource({
+      bookingId: item.id,
+      client_id: item.client_id,
+      property_id: item.property_id,
+      properties: item.properties,
+      profiles: item.profiles,
+    });
+  };
+
+  const openLeaseFromDeposit = (item: PendingDepositQueueItem) => {
+    setConvertLeaseSource({
+      bookingId: item.booking_id,
+      client_id: item.client_id,
+      property_id: item.property_id,
+      properties: item.properties
+        ? {
+            title: item.properties.title,
+            type: item.properties.type,
+            owner_id: item.properties.owner_id ?? null,
+            price: item.properties.price,
+          }
+        : null,
+      profiles: item.profiles,
+    });
+  };
+
+  const renderDepositItem = (item: PendingDepositQueueItem) => {
+    const readyForLease = isDepositReadyForLease(item);
+    return (
+    <QueueCard
+      title={item.properties?.title || 'Booking Deposit'}
+      badge={{
+        label: readyForLease ? 'Ready for lease' : 'Pending verify',
+        ...(readyForLease
+          ? {
+              backgroundColor: 'rgba(16, 185, 129, 0.15)',
+              borderColor: adminTheme.colors.success,
+              textColor: adminTheme.colors.success,
+            }
+          : {
+              backgroundColor: 'rgba(234, 179, 8, 0.15)',
+              borderColor: adminTheme.colors.warning,
+              textColor: adminTheme.colors.warning,
+            }),
+      }}
+      accentColor={readyForLease ? adminTheme.colors.success : adminTheme.colors.warning}
+      actions={
+        readyForLease ? (
+          <>
+            <QueueCardActionButton
+              label="Release"
+              variant="danger"
+              onPress={() => handleReleaseDeposit(item.id)}
+              icon={<X size={16} color={adminTheme.colors.danger} style={styles.btnIcon} />}
+            />
+            <QueueCardActionButton
+              label="Create Lease"
+              variant="primary"
+              onPress={() => openLeaseFromDeposit(item)}
+              icon={
+                <FilePlus
+                  size={16}
+                  color={adminTheme.colors.onAccent}
+                  style={styles.btnIcon}
+                />
+              }
+            />
+          </>
+        ) : (
+          <>
+            <QueueCardActionButton
+              label="Reject"
+              variant="danger"
+              onPress={() => handleVerifyDeposit(item.id, 'failed')}
+              icon={<X size={16} color={adminTheme.colors.danger} style={styles.btnIcon} />}
+            />
+            <QueueCardActionButton
+              label="Verify"
+              variant="primary"
+              onPress={() => handleVerifyDeposit(item.id, 'verified')}
+              icon={<CheckCircle size={16} color={adminTheme.colors.onAccent} style={styles.btnIcon} />}
+            />
+          </>
+        )
+      }
+    >
+      <Text style={styles.amount}>{formatPrice(Number(item.amount))}</Text>
+      <Text style={styles.refCode}>
+        Reference: <Text style={styles.boldText}>{item.reference_code}</Text>
+        {' · '}
+        {item.payment_method.toUpperCase()}
+      </Text>
+      <Text style={styles.locationText}>{item.properties?.location}</Text>
+      <Text style={[styles.refCode, { marginTop: 4 }]}>
+        {readyForLease
+          ? 'Deposit verified and listing reserved. Create a lease to assign this house to the tenant.'
+          : 'Security deposit (½ month) — reserves property; not rent.'}
+      </Text>
+      {item.proof_url ? (
+        <TouchableOpacity
+          style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 6 }}
+          onPress={() => Linking.openURL(item.proof_url!)}
+        >
+          <ExternalLink size={14} color={adminTheme.colors.accent} />
+          <Text style={styles.refCode}>View payment proof</Text>
+        </TouchableOpacity>
+      ) : null}
+      <QueueCardDivider />
+      <QueueCardInfoRow icon={<User size={16} color={adminTheme.colors.accent} style={styles.icon} />}>
+        <Text style={styles.clientName}>{item.profiles?.full_name || 'Unknown client'}</Text>
+        <Text style={styles.clientEmail}>
+          {item.profiles?.email || 'No email'} | {item.profiles?.phone || 'No phone'}
+        </Text>
+      </QueueCardInfoRow>
+      <Text style={styles.dateText}>Submitted: {formatDate(item.created_at)}</Text>
+    </QueueCard>
+    );
+  };
 
   const renderBookingItem = (item: Booking) => {
     const formatBookingDate = (dateStr: string) =>
@@ -559,7 +1102,7 @@ export default function AdminDashboard() {
                 <QueueCardActionButton
                   label="Lease"
                   variant="primary"
-                  onPress={() => setConvertBooking(item)}
+                  onPress={() => openLeaseFromBooking(item)}
                   icon={<FilePlus size={16} color={adminTheme.colors.onAccent} style={styles.btnIcon} />}
                 />
               ) : null}
@@ -608,7 +1151,10 @@ export default function AdminDashboard() {
           </Text>
         </QueueCardInfoRow>
         {item.properties?.type === 'sale' ? (
-          <Text style={styles.locationText}>Sale listing — complete viewing, then mark property sold when closed.</Text>
+          <Text style={styles.locationText}>
+            Sale listing — complete viewing, then verify the buyer's purchase proof (or mark sold
+            manually if closed offline).
+          </Text>
         ) : null}
         {item.notes ? (
           <View style={styles.noteBox}>
@@ -741,10 +1287,14 @@ export default function AdminDashboard() {
   const renderHeader = () => {
     const listTitles: Record<DashboardTab, string> = {
       payments: 'Pending Payment Proofs',
+      purchases: 'Pending Property Purchases',
+      deposits: 'Booking Deposits',
       bookings: 'Viewing Requests',
       maintenance: 'Active Maintenance Tickets',
       feedback: 'User Feedback & Complaints',
     };
+
+    const showMoneyStats = isFinance || activeSection === 'money';
 
     return (
       <View style={styles.statsContainer}>
@@ -755,28 +1305,72 @@ export default function AdminDashboard() {
             </Text>
             <Text style={styles.dateLabel}>{todayLabel}</Text>
             <Text style={styles.hubSubtitle}>
-              {isFinance ? 'Payment Verification' : 'Operations Hub'}
+              {isFinance
+                ? 'Payment, Purchase & Deposit Verification'
+                : 'Money & Operations'}
             </Text>
           </View>
           <NotificationBell href="/(admin)/notifications" />
         </View>
 
+        {!isFinance && pendingAccountCount > 0 ? (
+          <TouchableOpacity
+            style={styles.pendingApprovalsStrip}
+            onPress={() => router.navigate('/(admin)/users' as any)}
+            activeOpacity={0.85}
+          >
+            <View style={styles.pendingApprovalsIcon}>
+              <Users size={18} color={adminTheme.colors.onAccent} />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.pendingApprovalsTitle}>
+                {pendingAccountCount} pending account{pendingAccountCount === 1 ? '' : 's'}
+              </Text>
+              <Text style={styles.pendingApprovalsLead}>
+                Review self-signups before they can access the app.
+              </Text>
+            </View>
+            <Text style={styles.pendingApprovalsCta}>Review</Text>
+          </TouchableOpacity>
+        ) : null}
+
         <Text style={styles.statsTitle}>Overview Insights</Text>
         <View style={styles.statsGrid}>
-          <StatCard
-            label="Revenue"
-            value={formatPrice(stats.totalRevenue)}
-            icon={Wallet}
-            accentColor={adminTheme.colors.accent}
-          />
-          <StatCard
-            label="Leases"
-            value={String(stats.activeLeases)}
-            icon={LeaseIcon}
-            accentColor={adminTheme.colors.success}
-          />
-          {!isFinance ? (
+          {showMoneyStats ? (
             <>
+              <StatCard
+                label="Revenue"
+                value={formatPrice(stats.totalRevenue)}
+                icon={Wallet}
+                accentColor={adminTheme.colors.accent}
+              />
+              <StatCard
+                label="Payments"
+                value={String(queueCounts.payments)}
+                icon={CreditCard}
+                accentColor={adminTheme.colors.warning}
+              />
+              <StatCard
+                label="Purchases"
+                value={String(queueCounts.purchases)}
+                icon={ShoppingBag}
+                accentColor={adminTheme.colors.accent}
+              />
+              <StatCard
+                label="Deposits"
+                value={String(queueCounts.deposits)}
+                icon={Wallet}
+                accentColor={adminTheme.colors.success}
+              />
+            </>
+          ) : (
+            <>
+              <StatCard
+                label="Leases"
+                value={String(stats.activeLeases)}
+                icon={LeaseIcon}
+                accentColor={adminTheme.colors.success}
+              />
               <StatCard
                 label="Bookings"
                 value={String(stats.pendingBookings)}
@@ -789,11 +1383,29 @@ export default function AdminDashboard() {
                 icon={Wrench}
                 accentColor={adminTheme.colors.danger}
               />
+              <StatCard
+                label="Feedback"
+                value={String(queueCounts.feedback)}
+                icon={MessageSquare}
+                accentColor={adminTheme.colors.accent}
+              />
             </>
-          ) : null}
+          )}
         </View>
 
-        <SegmentedTabs tabs={tabItems} activeKey={activeTab} onChange={(key) => setActiveTab(key as DashboardTab)} />
+        {!isFinance ? (
+          <SegmentedTabs
+            tabs={sectionItems}
+            activeKey={activeSection}
+            onChange={(key) => handleSectionChange(key as DashboardSection)}
+          />
+        ) : null}
+
+        <SegmentedTabs
+          tabs={tabItems}
+          activeKey={activeTab}
+          onChange={(key) => handleTabChange(key as DashboardTab)}
+        />
 
         <Text style={styles.listTitle}>{listTitles[activeTab]}</Text>
       </View>
@@ -804,14 +1416,20 @@ export default function AdminDashboard() {
     switch (activeTab) {
       case 'payments':
         return payments;
+      case 'purchases':
+        return purchases;
+      case 'deposits':
+        return deposits;
       case 'bookings':
         return bookings;
       case 'maintenance':
         return maintenanceRequests;
       case 'feedback':
         return feedback;
-      default:
-        return [];
+      default: {
+        const _exhaustive: never = activeTab;
+        return _exhaustive;
+      }
     }
   };
 
@@ -820,6 +1438,12 @@ export default function AdminDashboard() {
     switch (activeTab) {
       case 'payments':
         content = renderPaymentItem(item);
+        break;
+      case 'purchases':
+        content = renderPurchaseItem(item);
+        break;
+      case 'deposits':
+        content = renderDepositItem(item);
         break;
       case 'bookings':
         content = renderBookingItem(item);
@@ -830,8 +1454,10 @@ export default function AdminDashboard() {
       case 'feedback':
         content = renderFeedbackItem(item);
         break;
-      default:
-        return null;
+      default: {
+        const _exhaustive: never = activeTab;
+        return _exhaustive;
+      }
     }
     return (
       <View style={highlightedId === item.id ? styles.highlightedWrap : undefined}>
@@ -844,14 +1470,22 @@ export default function AdminDashboard() {
     switch (activeTab) {
       case 'payments':
         return 'No pending rent payments awaiting verification.';
+      case 'purchases':
+        return 'No pending property purchases awaiting verification.';
+      case 'deposits':
+        return isFinance
+          ? 'No pending booking deposits awaiting verification.'
+          : 'No pending deposits to verify, and no verified deposits waiting for a lease.';
       case 'bookings':
-        return 'No viewing requests awaiting review or completion.';
+        return 'No viewing requests awaiting review. Approve appears here after a client submits Book Viewing. For deposit-only cases, use Create Lease on the Deposits tab.';
       case 'maintenance':
         return 'No active maintenance tickets pending attention.';
       case 'feedback':
         return 'No feedback logs found.';
-      default:
-        return 'No items found.';
+      default: {
+        const _exhaustive: never = activeTab;
+        return _exhaustive;
+      }
     }
   };
 
@@ -898,11 +1532,11 @@ export default function AdminDashboard() {
       />
 
       <ConvertBookingToLeaseModal
-        visible={!!convertBooking}
-        booking={convertBooking}
-        onClose={() => setConvertBooking(null)}
+        visible={!!convertLeaseSource}
+        source={convertLeaseSource}
+        onClose={() => setConvertLeaseSource(null)}
         onCreated={() => {
-          setConvertBooking(null);
+          setConvertLeaseSource(null);
           fetchDashboardData();
         }}
       />
@@ -951,6 +1585,40 @@ const styles = StyleSheet.create({
     color: adminTheme.colors.accent,
     fontWeight: '600',
     marginBottom: adminTheme.spacing.lg,
+  },
+  pendingApprovalsStrip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: adminTheme.spacing.md,
+    backgroundColor: adminTheme.colors.accentMuted,
+    borderColor: adminTheme.colors.accent,
+    borderWidth: 1,
+    borderRadius: adminTheme.radius.md,
+    padding: adminTheme.spacing.md,
+    marginBottom: adminTheme.spacing.lg,
+  },
+  pendingApprovalsIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: adminTheme.colors.accent,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  pendingApprovalsTitle: {
+    color: adminTheme.colors.text,
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  pendingApprovalsLead: {
+    color: adminTheme.colors.textMuted,
+    fontSize: 12,
+    marginTop: 2,
+  },
+  pendingApprovalsCta: {
+    color: adminTheme.colors.accent,
+    fontSize: 13,
+    fontWeight: '700',
   },
   statsTitle: {
     fontSize: 14,

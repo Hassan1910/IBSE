@@ -21,6 +21,10 @@ export function getNotificationRoute(
 
   switch (role) {
     case 'tenant': {
+      // Prefer type for rent_due — scheduled alerts set entity_type=lease.
+      if (type === 'rent_due') {
+        return withId('/(tenant)/rent', id);
+      }
       switch (entityType) {
         case 'maintenance':
           return withId('/(tenant)/maintenance', id);
@@ -32,6 +36,8 @@ export function getNotificationRoute(
           return withId('/(tenant)/agreements', id);
         case 'message_thread':
           return withId('/(tenant)/messages', id);
+        case 'deposit':
+          return '/(tenant)/dashboard' as Href;
       }
       // Fallbacks when entity_type is missing or announcement
       if (type === 'announcement' || type === 'lease_expiry') {
@@ -40,7 +46,7 @@ export function getNotificationRoute(
       if (type === 'message') {
         return withId('/(tenant)/messages', id);
       }
-      if (type === 'rent_due' || type === 'payment_confirmed' || type === 'payment_submitted') {
+      if (type === 'payment_confirmed' || type === 'payment_submitted') {
         return withId('/(tenant)/rent', id);
       }
       if (type === 'maintenance_update') {
@@ -48,6 +54,9 @@ export function getNotificationRoute(
       }
       if (type === 'feedback_reply') {
         return withId('/(tenant)/feedback', id);
+      }
+      if (type === 'deposit_update') {
+        return '/(tenant)/dashboard' as Href;
       }
       return '/(tenant)/dashboard' as Href;
     }
@@ -58,9 +67,18 @@ export function getNotificationRoute(
           return withId('/(client)/my-bookings', id);
         case 'feedback':
           return withId('/(client)/feedback', id);
+        case 'purchase':
+          return withId('/(client)/my-purchases', id);
+        case 'deposit':
+          return withId('/(client)/my-bookings', id);
+        case 'lease':
+          return '/(client)/my-bookings' as Href;
       }
-      if (type === 'booking_update') {
+      if (type === 'booking_update' || type === 'deposit_update') {
         return withId('/(client)/my-bookings', id);
+      }
+      if (type === 'purchase_update') {
+        return withId('/(client)/my-purchases', id);
       }
       if (type === 'feedback_reply') {
         return withId('/(client)/feedback', id);
@@ -79,8 +97,14 @@ export function getNotificationRoute(
           return withId('/(landlord)/agreements', id);
         case 'message_thread':
           return withId('/(landlord)/messages', id);
+        case 'deposit':
+          return '/(landlord)/agreements' as Href;
+        case 'purchase':
+          return '/(landlord)/properties' as Href;
         default:
           if (type === 'message') return withId('/(landlord)/messages', id);
+          if (type === 'deposit_update') return '/(landlord)/agreements' as Href;
+          if (type === 'purchase_update') return '/(landlord)/properties' as Href;
           if (type === 'announcement') return '/(landlord)/dashboard' as Href;
           return null;
       }
@@ -91,6 +115,9 @@ export function getNotificationRoute(
       if (entityType === 'landlord_account_request' || type === 'landlord_request') {
         return '/(admin)/users' as Href;
       }
+      if (entityType === 'profile' || type === 'account_approval') {
+        return '/(admin)/users' as Href;
+      }
 
       const dashboardTab =
         entityType === 'maintenance'
@@ -99,7 +126,11 @@ export function getNotificationRoute(
             ? 'payments'
             : entityType === 'booking'
               ? 'bookings'
-              : null;
+              : entityType === 'deposit' || type === 'deposit_update'
+                ? 'deposits'
+                : entityType === 'purchase' || type === 'purchase_update'
+                  ? 'purchases'
+                  : null;
 
       if (dashboardTab) {
         return {
@@ -115,7 +146,29 @@ export function getNotificationRoute(
     }
 
     case 'finance': {
-      // Finance only has dashboard (payments), reports, finances, profile.
+      // Finance only has dashboard (payments/purchases), reports, finances, profile.
+      // Account approval is admin-only — no route (UI shows a clear alert).
+      if (entityType === 'profile' || type === 'account_approval') {
+        return null;
+      }
+      if (entityType === 'purchase' || type === 'purchase_update') {
+        return {
+          pathname: '/(admin)/dashboard',
+          params: {
+            tab: 'purchases',
+            ...(id ? { id } : {}),
+          },
+        };
+      }
+      if (entityType === 'deposit' || type === 'deposit_update') {
+        return {
+          pathname: '/(admin)/dashboard',
+          params: {
+            tab: 'deposits',
+            ...(id ? { id } : {}),
+          },
+        };
+      }
       if (entityType === 'payment' || type === 'payment_confirmed' || type === 'payment_submitted' || type === 'rent_due') {
         return {
           pathname: '/(admin)/dashboard',
@@ -125,10 +178,23 @@ export function getNotificationRoute(
           },
         };
       }
+      // Ops notifications (bookings/maintenance/feedback) are admin-owned — send to money home.
+      if (
+        entityType === 'booking' ||
+        entityType === 'maintenance' ||
+        entityType === 'feedback' ||
+        type === 'booking_update' ||
+        type === 'maintenance_update' ||
+        type === 'feedback_reply'
+      ) {
+        return '/(admin)/dashboard' as Href;
+      }
       return '/(admin)/finances' as Href;
     }
 
-    default:
-      return null;
+    default: {
+      const _exhaustive: never = role;
+      return _exhaustive;
+    }
   }
 }

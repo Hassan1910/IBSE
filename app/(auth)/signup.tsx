@@ -18,7 +18,9 @@ import { supabase, setSupabaseToken } from '../../lib/supabase';
 import { logAudit } from '../../lib/audit';
 import { resolveInvite, markInviteAccepted, hasPendingInvite } from '../../lib/invites';
 import { isPublicSignupAllowed } from '../../lib/settings';
+import { notifyAdmins } from '../../lib/notifications';
 import RequestLandlordAccountModal from '../../components/RequestLandlordAccountModal';
+import { clearAuthIntent, getAuthIntent } from '../../lib/authIntent';
 
 // Client and tenant self-register. Landlord accounts are admin-created
 // after a request; finance/admin are invite-only.
@@ -39,6 +41,28 @@ export default function SignUpScreen() {
   const [role, setRole] = React.useState<'tenant' | 'client'>('client');
   const [loading, setLoading] = React.useState(false);
   const [landlordRequestVisible, setLandlordRequestVisible] = React.useState(false);
+  const [hasPendingAuthIntent, setHasPendingAuthIntent] = React.useState(false);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const intent = await getAuthIntent();
+      if (cancelled || !intent) return;
+      setRole('client');
+      setHasPendingAuthIntent(true);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const onSelectRole = (next: 'tenant' | 'client') => {
+    setRole(next);
+    if (next === 'tenant' && hasPendingAuthIntent) {
+      void clearAuthIntent();
+      setHasPendingAuthIntent(false);
+    }
+  };
 
   const completeSignUpFlow = async (createdUserId: string | null | undefined, createdSessionId: string | null | undefined) => {
     if (!createdSessionId || !setActive) {
@@ -92,6 +116,22 @@ export default function SignUpScreen() {
         action: 'login',
         description: 'Account created and signed in',
       });
+    }
+
+    // Public self-signups stay pending until an admin approves.
+    if (!invite && (finalRole === 'tenant' || finalRole === 'client')) {
+      try {
+        await notifyAdmins({
+          type: 'account_approval',
+          title: 'New account pending approval',
+          body: `${fullName} (${emailAddress}) signed up as ${finalRole}.`,
+          entityType: 'profile',
+          entityId: createdUserId ?? undefined,
+          roles: ['admin'],
+        });
+      } catch (notifyErr) {
+        console.warn('[SignUp] Failed to notify admins of pending account:', notifyErr);
+      }
     }
   };
 
@@ -250,7 +290,7 @@ export default function SignUpScreen() {
                     styles.roleBtn,
                     role === r.value && styles.roleBtnActive,
                   ]}
-                  onPress={() => setRole(r.value as any)}
+                  onPress={() => onSelectRole(r.value as 'tenant' | 'client')}
                 >
                   <Text
                     style={[
@@ -264,8 +304,9 @@ export default function SignUpScreen() {
               ))}
             </View>
             <Text style={styles.roleHint}>
-              Landlord accounts are created by IBSA after review — request access below.
-              Staff accounts (finance/admin) are invited by an administrator.
+              {hasPendingAuthIntent
+                ? 'A Client account is required to pay a security deposit or buy a property. Choosing Tenant cancels that pending action.'
+                : 'Landlord accounts are created by IBSA after review — request access below. Staff accounts (finance/admin) are invited by an administrator.'}
             </Text>
             <TouchableOpacity
               style={styles.landlordRequestLink}

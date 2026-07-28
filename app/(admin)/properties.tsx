@@ -30,7 +30,7 @@ interface Property {
   category: 'residential' | 'commercial' | 'land';
   price: number;
   location: string;
-  status: 'available' | 'rented' | 'sold';
+  status: 'available' | 'reserved' | 'rented' | 'sold';
   image_urls: string[] | null;
   owner_id?: string | null;
   profiles?: { full_name: string } | null;
@@ -317,7 +317,7 @@ export default function AdminPropertiesScreen() {
                       onPress={() => {
                         Alert.alert(
                           'Mark as Sold',
-                          `Mark "${item.title}" as sold? It will leave the client marketplace.`,
+                          `Mark "${item.title}" as sold offline? Prefer verifying an in-app purchase proof when the buyer paid through the app. This removes it from the marketplace.`,
                           [
                             { text: 'Cancel', style: 'cancel' },
                             {

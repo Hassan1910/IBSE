@@ -9,6 +9,7 @@ import {
   markNotificationAsRead,
 } from '../lib/notifications';
 import { getNotificationRoute, type NotificationRole } from '../lib/notificationRoutes';
+import { subscribeNotificationListSync } from '../lib/notificationMoneySync';
 import { BellRing, CheckCheck } from 'lucide-react-native';
 
 interface NotificationsScreenProps {
@@ -44,6 +45,13 @@ export default function NotificationsScreen({ role }: NotificationsScreenProps) 
     loadNotifications();
   }, [loadNotifications]);
 
+  useEffect(() => {
+    if (!user?.id) return;
+    return subscribeNotificationListSync(user.id, () => {
+      void loadNotifications();
+    });
+  }, [user?.id, loadNotifications]);
+
   const openNotification = async (item: AppNotification) => {
     if (!item.read_at) {
       const { error } = await markNotificationAsRead(item.id);
@@ -54,7 +62,11 @@ export default function NotificationsScreen({ role }: NotificationsScreenProps) 
 
     const target = getNotificationRoute(role, item);
     if (target) {
-      router.push(target as any);
+      router.navigate(target as any);
+      return;
+    }
+    if (item.type === 'account_approval' || item.entity_type === 'profile') {
+      Alert.alert('Account approval', 'Only admins can approve new accounts. Open Users & Leases from an admin account.');
     }
   };
 

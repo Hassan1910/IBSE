@@ -12,6 +12,7 @@ export type AdminReportSummary = {
   property: {
     total: number;
     available: number;
+    reserved?: number;
     rented: number;
     sold: number;
     residential: number;
@@ -20,10 +21,19 @@ export type AdminReportSummary = {
     rental_units: number;
   };
   financial: {
+    rent_revenue: number;
+    purchase_revenue: number;
     verified_revenue: number;
     pending_amount: number;
+    pending_rent: number;
+    pending_purchases: number;
+    deposits_held?: number;
+    deposits_refunded?: number;
+    deposits_retained?: number;
+    deposits_pending?: number;
     total_expenses: number;
     payments_count: number;
+    purchases_count: number;
   };
   occupancy: {
     active_leases: number;
@@ -87,15 +97,45 @@ export async function fetchVerifiedRevenueSum(): Promise<number> {
   return Number(data ?? 0);
 }
 
+export type AdminRevenueBreakdown = {
+  rent_revenue: number;
+  purchase_revenue: number;
+  total_revenue: number;
+};
+
+export async function fetchRevenueBreakdown(): Promise<AdminRevenueBreakdown> {
+  const { data, error } = await supabase.rpc('admin_revenue_breakdown');
+  if (error) throw error;
+  const row = (data ?? {}) as Record<string, unknown>;
+  return {
+    rent_revenue: Number(row.rent_revenue ?? 0),
+    purchase_revenue: Number(row.purchase_revenue ?? 0),
+    total_revenue: Number(row.total_revenue ?? 0),
+  };
+}
+
 export async function fetchTotalExpensesSum(): Promise<number> {
   const { data, error } = await supabase.rpc('admin_total_expenses');
   if (error) throw error;
   return Number(data ?? 0);
 }
 
+export async function fetchAvailablePropertyById(propertyId: string) {
+  const { data, error } = await supabase
+    .from('properties')
+    .select(PROPERTY_CARD_COLS)
+    .eq('id', propertyId)
+    .eq('status', 'available')
+    .maybeSingle();
+  if (error) throw error;
+  return data;
+}
+
 export async function fetchAvailablePropertiesPage(
   category: string,
-  page: number
+  page: number,
+  /** Lowercase DB categories; when set, "All" uses `.in` instead of no filter. */
+  allowedCategories?: string[]
 ) {
   const from = page * PAGE_SIZE.properties;
   const to = from + PAGE_SIZE.properties - 1;
@@ -108,6 +148,8 @@ export async function fetchAvailablePropertiesPage(
 
   if (category !== 'All') {
     query = query.eq('category', category.toLowerCase());
+  } else if (allowedCategories && allowedCategories.length > 0) {
+    query = query.in('category', allowedCategories);
   }
 
   const { data, error } = await query;
@@ -273,7 +315,7 @@ export async function fetchAdminUsersPage(page: number) {
   const to = from + PAGE_SIZE.tables - 1;
   const { data, error } = await supabase
     .from('profiles')
-    .select('id, full_name, email, phone, role, created_at, avatar_url')
+    .select('id, full_name, email, phone, role, created_at, avatar_url, account_status')
     .order('created_at', { ascending: false })
     .range(from, to);
   if (error) throw error;
