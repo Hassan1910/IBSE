@@ -23,6 +23,7 @@ import {
   promoteClientToTenant,
 } from '../../lib/leases';
 import DatePickerModal from '../../components/DatePickerModal';
+import LeaseCandidateLookup from '../../components/LeaseCandidateLookup';
 import NotificationBell from '../../components/NotificationBell';
 import { UserPlus, X, Mail, Phone, Home, Calendar, Users, FilePlus, FileText, MessageSquare } from 'lucide-react-native';
 
@@ -666,25 +667,40 @@ export default function LandlordTenants() {
                           allTenantProfiles.find((p) => p.id === selectedTenantId)?.full_name ||
                           'Selected tenant'}
                       </Text>
-                    ) : allTenantProfiles.length === 0 ? (
-                      <Text style={styles.errorText}>No tenants found. Create a tenant account first.</Text>
                     ) : (
-                      allTenantProfiles.map((t) => (
-                        <TouchableOpacity
-                          key={t.id}
-                          style={[styles.optionBtn, selectedTenantId === t.id && styles.optionBtnActive]}
-                          onPress={() => {
-                            setSelectedTenantId(t.id);
-                            setSelectedTenantName(t.full_name);
+                      <>
+                        <LeaseCandidateLookup
+                          onFound={(c) => {
+                            setAllTenantProfiles((prev) =>
+                              prev.some((p) => p.id === c.id) ? prev : [...prev, c]
+                            );
+                            setSelectedTenantId(c.id);
+                            setSelectedTenantName(c.full_name);
                           }}
-                        >
-                          <Text
-                            style={[styles.optionText, selectedTenantId === t.id && styles.optionTextActive]}
-                          >
-                            {t.full_name} ({t.role})
+                        />
+                        {allTenantProfiles.length === 0 ? (
+                          <Text style={styles.errorText}>
+                            No linked tenants or clients yet. Find one by email above.
                           </Text>
-                        </TouchableOpacity>
-                      ))
+                        ) : (
+                          allTenantProfiles.map((t) => (
+                            <TouchableOpacity
+                              key={t.id}
+                              style={[styles.optionBtn, selectedTenantId === t.id && styles.optionBtnActive]}
+                              onPress={() => {
+                                setSelectedTenantId(t.id);
+                                setSelectedTenantName(t.full_name);
+                              }}
+                            >
+                              <Text
+                                style={[styles.optionText, selectedTenantId === t.id && styles.optionTextActive]}
+                              >
+                                {t.full_name} ({t.role})
+                              </Text>
+                            </TouchableOpacity>
+                          ))
+                        )}
+                      </>
                     )}
                   </View>
 

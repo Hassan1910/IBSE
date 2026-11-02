@@ -7,7 +7,6 @@ import {
   TouchableOpacity,
   ActivityIndicator,
   Alert,
-  Linking,
 } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
@@ -22,6 +21,7 @@ import { useInfiniteList } from '../../hooks/queries/useInfiniteList';
 import { fetchLandlordDashboardStats, fetchLandlordPaymentsPage } from '../../hooks/queries/fetchers';
 import { queryKeys } from '../../hooks/queries/keys';
 import { PAGE_SIZE } from '../../lib/queryClient';
+import { openStorageUrl } from '../../lib/storage';
 
 interface Payment {
   id: string;
@@ -112,7 +112,7 @@ export default function LandlordPayments() {
 
   const openUrl = async (url: string) => {
     try {
-      await Linking.openURL(url);
+      await openStorageUrl(url);
     } catch {
       Alert.alert('Cannot Open', 'This link is not valid.');
     }

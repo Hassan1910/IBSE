@@ -2,7 +2,6 @@ import React, { useCallback, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
-  Linking,
   ScrollView,
   StyleSheet,
   Text,
@@ -18,6 +17,7 @@ import {
   type DepositPayment,
 } from '../../lib/depositPayments';
 import { CreditCard, FileText, Link as LinkIcon, Receipt, Wallet } from 'lucide-react-native';
+import { openStorageUrl } from '../../lib/storage';
 
 interface LeaseDocRow {
   id: string;
@@ -151,7 +151,7 @@ export default function TenantDocumentsScreen() {
 
   const openUrl = async (url: string) => {
     try {
-      await Linking.openURL(url);
+      await openStorageUrl(url);
     } catch {
       Alert.alert('Cannot Open', 'This link is not valid.');
     }

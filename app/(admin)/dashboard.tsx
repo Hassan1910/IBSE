@@ -9,7 +9,6 @@ import {
   ScrollView,
   Linking,
 } from 'react-native';
-import { Image } from 'expo-image';
 import { supabase } from '../../lib/supabase';
 import { useUser } from '@clerk/clerk-expo';
 import { useRole } from '../../hooks/useRole';
@@ -29,7 +28,7 @@ import {
   releaseDepositPayment,
   type PendingDepositQueueItem,
 } from '../../lib/depositPayments';
-import { pickDocument, createSignedStorageUrl } from '../../lib/storage';
+import { pickDocument, createSignedStorageUrl, openStorageUrl } from '../../lib/storage';
 import MaterialsUsedModal from '../../components/MaterialsUsedModal';
 import NotificationBell from '../../components/NotificationBell';
 import StatCard from '../../components/admin/StatCard';
@@ -73,6 +72,7 @@ import {
 import ConvertBookingToLeaseModal, {
   type LeaseConversionSource,
 } from '../../components/ConvertBookingToLeaseModal';
+import StorageImage from '../../components/StorageImage';
 
 function getGreeting(): string {
   const hour = new Date().getHours();
@@ -856,7 +856,7 @@ export default function AdminDashboard() {
         Reference: <Text style={styles.boldText}>{item.reference_code}</Text>
       </Text>
       {item.proof_url ? (
-        <TouchableOpacity onPress={() => Linking.openURL(item.proof_url!)}>
+        <TouchableOpacity onPress={() => openStorageUrl(item.proof_url!).catch(() => Alert.alert('Error', 'Could not open the payment proof.'))}>
           <Text style={[styles.refCode, { marginTop: 6 }]}>View payment proof</Text>
         </TouchableOpacity>
       ) : null}
@@ -907,7 +907,7 @@ export default function AdminDashboard() {
         {item.proof_url ? (
           <TouchableOpacity
             style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 6 }}
-            onPress={() => Linking.openURL(item.proof_url!)}
+            onPress={() => openStorageUrl(item.proof_url!).catch(() => Alert.alert('Error', 'Could not open the payment proof.'))}
           >
             <ExternalLink size={14} color={adminTheme.colors.accent} />
             <Text style={styles.refCode}>View payment proof</Text>
@@ -1042,7 +1042,7 @@ export default function AdminDashboard() {
       {item.proof_url ? (
         <TouchableOpacity
           style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 6 }}
-          onPress={() => Linking.openURL(item.proof_url!)}
+          onPress={() => openStorageUrl(item.proof_url!).catch(() => Alert.alert('Error', 'Could not open the payment proof.'))}
         >
           <ExternalLink size={14} color={adminTheme.colors.accent} />
           <Text style={styles.refCode}>View payment proof</Text>
@@ -1214,7 +1214,7 @@ export default function AdminDashboard() {
         {item.image_urls?.length ? (
           <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.maintImageRow}>
             {item.image_urls.map((uri) => (
-              <Image key={uri} source={{ uri }} style={styles.maintImage} contentFit="cover" cachePolicy="memory-disk" />
+              <StorageImage key={uri} uri={uri} style={styles.maintImage} contentFit="cover" cachePolicy="memory-disk" />
             ))}
           </ScrollView>
         ) : null}

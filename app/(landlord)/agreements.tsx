@@ -10,7 +10,6 @@ import {
   TextInput,
   Alert,
   ScrollView,
-  Linking,
 } from 'react-native';
 import { useFocusEffect } from 'expo-router';
 import { useUser } from '@clerk/clerk-expo';
@@ -23,8 +22,9 @@ import {
   promoteClientToTenant,
 } from '../../lib/leases';
 import { terminateLeaseWithDeposit } from '../../lib/depositPayments';
-import { pickDocument, uploadContract, uploadLeaseDocumentFile } from '../../lib/storage';
+import { pickDocument, uploadContract, uploadLeaseDocumentFile, openStorageUrl } from '../../lib/storage';
 import DatePickerModal from '../../components/DatePickerModal';
+import LeaseCandidateLookup from '../../components/LeaseCandidateLookup';
 import { Plus, X, FileText, Calendar, User as UserIcon, RefreshCw, Ban, Link as LinkIcon, Upload, MessageSquare } from 'lucide-react-native';
 import NotificationBell from '../../components/NotificationBell';
 import { useRouter } from 'expo-router';
@@ -522,7 +522,7 @@ export default function LandlordAgreements() {
                     onPress={() => {
                       const url = item.contract_url!;
                       const href = /^https?:\/\//i.test(url) ? url : `https://${url}`;
-                      Linking.openURL(href).catch(() =>
+                      openStorageUrl(href).catch(() =>
                         Alert.alert('Error', 'Could not open the contract link.')
                       );
                     }}
@@ -605,8 +605,14 @@ export default function LandlordAgreements() {
             <ScrollView contentContainerStyle={styles.modalBody} showsVerticalScrollIndicator={false}>
               <View style={styles.inputGroup}>
                 <Text style={styles.label}>Tenant</Text>
+                <LeaseCandidateLookup
+                  onFound={(c) => {
+                    setTenants((prev) => (prev.some((t) => t.id === c.id) ? prev : [...prev, c]));
+                    setSelectedTenant(c.id);
+                  }}
+                />
                 {tenants.length === 0 ? (
-                  <Text style={styles.errorText}>No tenants found. Create a tenant account first.</Text>
+                  <Text style={styles.errorText}>No linked tenants or clients yet. Find one by email above.</Text>
                 ) : (
                   tenants.map((t) => (
                     <TouchableOpacity

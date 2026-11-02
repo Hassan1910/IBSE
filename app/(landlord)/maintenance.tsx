@@ -11,7 +11,6 @@ import {
   Alert,
   ScrollView,
 } from 'react-native';
-import { Image } from 'expo-image';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useQueryClient } from '@tanstack/react-query';
 import { supabase } from '../../lib/supabase';
@@ -25,6 +24,7 @@ import { useInfiniteList } from '../../hooks/queries/useInfiniteList';
 import { fetchLandlordMaintenancePage } from '../../hooks/queries/fetchers';
 import { queryKeys } from '../../hooks/queries/keys';
 import { PAGE_SIZE } from '../../lib/queryClient';
+import StorageImage from '../../components/StorageImage';
 
 interface MaintenanceRequest {
   id: string;
@@ -239,7 +239,7 @@ export default function LandlordMaintenance() {
                 {item.image_urls?.length ? (
                   <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.imageRow}>
                     {item.image_urls.map((uri) => (
-                      <Image key={uri} source={{ uri }} style={styles.issueImage} contentFit="cover" cachePolicy="memory-disk" />
+                      <StorageImage key={uri} uri={uri} style={styles.issueImage} contentFit="cover" cachePolicy="memory-disk" />
                     ))}
                   </ScrollView>
                 ) : null}

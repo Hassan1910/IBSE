@@ -1,9 +1,10 @@
 import React, { useEffect, useState } from 'react';
-import { ActivityIndicator, Alert, Linking, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Alert, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { useUser } from '@clerk/clerk-expo';
 import { supabase } from '../../lib/supabase';
 import { fetchLeaseBalance, leaseTotalRent } from '../../lib/leases';
 import { Calendar, FileText, Home, Link as LinkIcon } from 'lucide-react-native';
+import { openStorageUrl } from '../../lib/storage';
 
 interface LeaseAgreement {
   id: string;
@@ -82,7 +83,7 @@ export default function TenantAgreementsScreen() {
   const openContract = async () => {
     if (!lease?.contract_url) return;
     try {
-      await Linking.openURL(lease.contract_url);
+      await openStorageUrl(lease.contract_url);
     } catch {
       Alert.alert('Invalid URL', 'Could not open this contract link.');
     }
