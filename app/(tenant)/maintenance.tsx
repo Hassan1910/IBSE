@@ -11,6 +11,7 @@ import { useAudit } from '../../hooks/useAudit';
 import { Camera, CheckCircle, ClipboardList, Clock, DollarSign, HelpCircle, Plus, Wrench, X } from 'lucide-react-native';
 import { fetchTenantMaintenance } from '../../hooks/queries/fetchers';
 import { queryKeys } from '../../hooks/queries/keys';
+import StorageImage from '../../components/StorageImage';
 
 function newRequestId() {
   const c = globalThis.crypto as Crypto | undefined;
@@ -318,7 +319,7 @@ export default function TenantMaintenanceScreen() {
                 {photoUrls(item).length > 0 ? (
                   <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.cardImageRow}>
                     {photoUrls(item).map((uri) => (
-                      <Image key={uri} source={{ uri }} style={styles.cardImage} contentFit="cover" />
+                      <StorageImage key={uri} uri={uri} style={styles.cardImage} contentFit="cover" />
                     ))}
                   </ScrollView>
                 ) : null}
@@ -495,7 +496,7 @@ export default function TenantMaintenanceScreen() {
                 {photoUrls(detailItem).length > 0 ? (
                   <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.detailImageRow}>
                     {photoUrls(detailItem).map((uri) => (
-                      <Image key={uri} source={{ uri }} style={styles.detailImage} contentFit="cover" />
+                      <StorageImage key={uri} uri={uri} style={styles.detailImage} contentFit="cover" />
                     ))}
                   </ScrollView>
                 ) : (

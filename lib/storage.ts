@@ -2,6 +2,7 @@ import * as ImagePicker from 'expo-image-picker';
 import * as DocumentPicker from 'expo-document-picker';
 import { File } from 'expo-file-system';
 import { Buffer } from 'buffer';
+import { Linking } from 'react-native';
 import { supabase } from './supabase';
 
 export type PickedImage = {
@@ -245,4 +246,49 @@ export async function uploadPaymentReceipt(
   if (error) throw error;
   const { data } = supabase.storage.from('payment-receipts').getPublicUrl(path);
   return data.publicUrl;
+}
+
+/**
+ * Buckets that are private (see migration 20260741000000_tighten_rls_and_storage).
+ * Their stored getPublicUrl() links no longer work on their own, so the app must
+ * exchange them for a short-lived signed URL before opening or displaying them.
+ */
+export const PRIVATE_BUCKETS = [
+  'contracts',
+  'lease-documents',
+  'payment-proofs',
+  'payment-receipts',
+  'maintenance-images',
+  'purchase-documents',
+] as const;
+
+const STORAGE_URL_RE = /\/storage\/v1\/object\/(?:public|sign|authenticated)\/([^/?#]+)\/([^?#]+)/;
+
+/** Split a Supabase Storage URL into bucket + object path, or null if it is not one. */
+export function parseStorageUrl(url: string): { bucket: string; path: string } | null {
+  const match = STORAGE_URL_RE.exec(url);
+  if (!match) return null;
+  return { bucket: match[1], path: decodeURIComponent(match[2]) };
+}
+
+/**
+ * Turn a stored file URL into something the device can open.
+ * - Files in a private bucket → fresh signed URL (requires the caller to pass RLS).
+ * - Anything else (public buckets, external links typed by a landlord) → unchanged.
+ */
+export async function resolveStorageUrl(
+  url: string | null | undefined,
+  expiresInSeconds = 3600,
+): Promise<string | null> {
+  if (!url) return null;
+  const parsed = parseStorageUrl(url);
+  if (!parsed || !(PRIVATE_BUCKETS as readonly string[]).includes(parsed.bucket)) return url;
+  return createSignedStorageUrl(parsed.bucket, parsed.path, expiresInSeconds);
+}
+
+/** Open a stored file URL (signing it first when it lives in a private bucket). */
+export async function openStorageUrl(url: string | null | undefined): Promise<void> {
+  const resolved = await resolveStorageUrl(url);
+  if (!resolved) return;
+  await Linking.openURL(resolved);
 }

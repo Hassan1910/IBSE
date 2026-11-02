@@ -8,7 +8,6 @@ import {
   ScrollView,
   RefreshControl,
   TouchableOpacity,
-  Linking,
 } from 'react-native';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
@@ -31,6 +30,7 @@ import { fetchTenantDashboard } from '../../hooks/queries/fetchers';
 import { queryKeys } from '../../hooks/queries/keys';
 import { invalidateTenantMoneyQueries } from '../../lib/invalidateMoneyQueries';
 import { supabase } from '../../lib/supabase';
+import { openStorageUrl } from '../../lib/storage';
 
 interface Lease {
   id: string;
@@ -168,7 +168,7 @@ export default function TenantDashboard() {
 
   const openUrl = async (url: string) => {
     try {
-      await Linking.openURL(url);
+      await openStorageUrl(url);
     } catch {
       Alert.alert('Cannot Open', 'This link is not valid.');
     }

@@ -20,7 +20,7 @@ import {
   type PropertyPurchase,
   type PurchaseStatus,
 } from '../../lib/purchases';
-import { createSignedStorageUrl } from '../../lib/storage';
+import { createSignedStorageUrl, openStorageUrl } from '../../lib/storage';
 
 function formatPrice(price: number) {
   return new Intl.NumberFormat('en-KE', {
@@ -81,7 +81,7 @@ export default function MyPurchasesScreen() {
 
   const openUrl = async (url: string) => {
     try {
-      await Linking.openURL(url);
+      await openStorageUrl(url);
     } catch {
       Alert.alert('Error', 'Could not open the file.');
     }
