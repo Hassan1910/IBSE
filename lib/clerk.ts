@@ -42,9 +42,16 @@ export const tokenCache: TokenCache = {
   },
   async clearToken(key: string) {
     try {
-      return SecureStore.deleteItemAsync(key);
+      await SecureStore.deleteItemAsync(key);
     } catch (err) {
       console.error('Clerk SecureStore clearToken error: ', err);
     }
   }
 };
+
+/** Persisted native client JWT. Clerk's Expo cache key (see @clerk/clerk-expo). */
+const CLERK_CLIENT_JWT_KEY = '__clerk_client_jwt';
+
+export async function clearCachedClerkClient(): Promise<void> {
+  await tokenCache.clearToken?.(CLERK_CLIENT_JWT_KEY);
+}

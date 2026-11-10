@@ -1,27 +1,17 @@
 import React from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Alert } from 'react-native';
-import { useUser, useAuth } from '@clerk/clerk-expo';
+import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
+import { useUser } from '@clerk/clerk-expo';
 import { LogOut, User, Mail, Phone } from 'lucide-react-native';
 import { useRole } from '../../hooks/useRole';
+import { useSignOutPrompt } from '../../hooks/useSignOutPrompt';
 import { adminTheme } from '../../constants/adminTheme';
 import ChangePasswordCard from '../../components/ChangePasswordCard';
 
 export default function AdminProfile() {
   const { user } = useUser();
-  const { signOut } = useAuth();
   const { role } = useRole();
+  const { requestSignOut, signOutModal } = useSignOutPrompt();
   const accountLabel = role === 'finance' ? 'IBSA Finance Account' : 'IBSA Administrator Account';
-
-  const handleSignOut = () => {
-    Alert.alert(
-      'Sign Out',
-      'Are you sure you want to sign out?',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        { text: 'Sign Out', style: 'destructive', onPress: () => signOut() },
-      ]
-    );
-  };
 
   return (
     <View style={styles.container}>
@@ -53,10 +43,11 @@ export default function AdminProfile() {
 
       <ChangePasswordCard />
 
-      <TouchableOpacity style={styles.logoutBtn} onPress={handleSignOut}>
+      <TouchableOpacity style={styles.logoutBtn} onPress={requestSignOut}>
         <LogOut size={20} color={adminTheme.colors.danger} style={styles.logoutIcon} />
         <Text style={styles.logoutText}>Sign Out</Text>
       </TouchableOpacity>
+      {signOutModal}
     </View>
   );
 }

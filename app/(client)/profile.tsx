@@ -11,13 +11,14 @@ import {
   View,
 } from 'react-native';
 import { Image } from 'expo-image';
-import { useAuth, useUser } from '@clerk/clerk-expo';
+import { useUser } from '@clerk/clerk-expo';
 import { useRouter } from 'expo-router';
 import { supabase } from '../../lib/supabase';
 import { useAudit } from '../../hooks/useAudit';
 import { pickImages, uploadImage } from '../../lib/storage';
 import ChangePasswordCard from '../../components/ChangePasswordCard';
 import { Camera, Edit2, LogOut, Mail, Phone, User, X } from 'lucide-react-native';
+import { useSignOutPrompt } from '../../hooks/useSignOutPrompt';
 
 interface ClientProfileRow {
   full_name: string;
@@ -28,8 +29,8 @@ interface ClientProfileRow {
 
 export default function ClientProfile() {
   const { user } = useUser();
-  const { signOut } = useAuth();
   const router = useRouter();
+  const { requestSignOut, signOutModal } = useSignOutPrompt();
   const { log } = useAudit();
   const [profile, setProfile] = useState<ClientProfileRow | null>(null);
   const [loading, setLoading] = useState(true);
@@ -126,13 +127,6 @@ export default function ClientProfile() {
     }
   };
 
-  const handleSignOut = () => {
-    Alert.alert('Sign Out', 'Are you sure you want to sign out?', [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Sign Out', style: 'destructive', onPress: () => signOut() },
-    ]);
-  };
-
   if (loading) {
     return (
       <View style={styles.centered}>
@@ -195,10 +189,11 @@ export default function ClientProfile() {
         <Text style={styles.helpBtnText}>Help & Guides</Text>
       </TouchableOpacity>
 
-      <TouchableOpacity style={styles.logoutBtn} onPress={handleSignOut}>
+      <TouchableOpacity style={styles.logoutBtn} onPress={requestSignOut}>
         <LogOut size={20} color="#EF4444" style={styles.logoutIcon} />
         <Text style={styles.logoutText}>Sign Out</Text>
       </TouchableOpacity>
+      {signOutModal}
 
       <Modal visible={editVisible} transparent animationType="slide" onRequestClose={() => setEditVisible(false)}>
         <View style={styles.modalOverlay}>

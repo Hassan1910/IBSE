@@ -10,7 +10,8 @@ import {
   ActivityIndicator,
   ScrollView,
 } from 'react-native';
-import { useUser, useAuth } from '@clerk/clerk-expo';
+import { useUser } from '@clerk/clerk-expo';
+import { useSignOutPrompt } from '../../hooks/useSignOutPrompt';
 import { supabase } from '../../lib/supabase';
 import { LogOut, User, Mail, Phone, Edit2, KeyRound, X, ShieldCheck } from 'lucide-react-native';
 
@@ -22,7 +23,7 @@ interface ProfileRow {
 
 export default function LandlordProfile() {
   const { user } = useUser();
-  const { signOut } = useAuth();
+  const { requestSignOut, signOutModal } = useSignOutPrompt();
 
   const [profile, setProfile] = useState<ProfileRow | null>(null);
   const [loading, setLoading] = useState(true);
@@ -114,13 +115,6 @@ export default function LandlordProfile() {
     }
   };
 
-  const handleSignOut = () => {
-    Alert.alert('Sign Out', 'Are you sure you want to sign out?', [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Sign Out', style: 'destructive', onPress: () => signOut() },
-    ]);
-  };
-
   if (loading) {
     return (
       <View style={styles.centered}>
@@ -174,10 +168,11 @@ export default function LandlordProfile() {
         </Text>
       </View>
 
-      <TouchableOpacity style={styles.logoutBtn} onPress={handleSignOut}>
+      <TouchableOpacity style={styles.logoutBtn} onPress={requestSignOut}>
         <LogOut size={20} color="#EF4444" style={styles.actionIcon} />
         <Text style={styles.logoutText}>Sign Out</Text>
       </TouchableOpacity>
+      {signOutModal}
 
       {/* Edit Profile Modal */}
       <Modal animationType="slide" transparent visible={editVisible} onRequestClose={() => setEditVisible(false)}>

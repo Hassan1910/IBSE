@@ -4,7 +4,6 @@ import {
   Text,
   StyleSheet,
   TouchableOpacity,
-  Alert,
 } from 'react-native';
 import { Image } from 'expo-image';
 import {
@@ -12,7 +11,7 @@ import {
   type DrawerContentComponentProps,
 } from '@react-navigation/drawer';
 import { useRouter, usePathname } from 'expo-router';
-import { useUser, useAuth } from '@clerk/clerk-expo';
+import { useUser } from '@clerk/clerk-expo';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { LogOut, Shield } from 'lucide-react-native';
 import { adminTheme } from '../../constants/adminTheme';
@@ -22,14 +21,15 @@ import {
   type AdminNavItem,
 } from '../../lib/adminNav';
 import { useRole } from '../../hooks/useRole';
+import { useSignOutPrompt } from '../../hooks/useSignOutPrompt';
 
 export default function AdminDrawerContent(props: DrawerContentComponentProps) {
   const router = useRouter();
   const pathname = usePathname();
   const insets = useSafeAreaInsets();
   const { user } = useUser();
-  const { signOut } = useAuth();
   const { role } = useRole();
+  const { requestSignOut, signOutModal } = useSignOutPrompt();
 
   const isFinance = role === 'finance';
   const navItems = getNavItemsForRole(isFinance);
@@ -40,13 +40,6 @@ export default function AdminDrawerContent(props: DrawerContentComponentProps) {
   const navigateTo = (item: AdminNavItem) => {
     router.push(`/(admin)/${item.name}` as any);
     props.navigation.closeDrawer();
-  };
-
-  const handleSignOut = () => {
-    Alert.alert('Sign Out', 'Are you sure you want to sign out?', [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Sign Out', style: 'destructive', onPress: () => signOut() },
-    ]);
   };
 
   const firstName = user?.firstName || user?.fullName?.split(' ')[0] || 'Admin';
@@ -124,11 +117,12 @@ export default function AdminDrawerContent(props: DrawerContentComponentProps) {
           </View>
         </View>
 
-        <TouchableOpacity style={styles.signOutBtn} onPress={handleSignOut} activeOpacity={0.7}>
+        <TouchableOpacity style={styles.signOutBtn} onPress={requestSignOut} activeOpacity={0.7}>
           <LogOut size={16} color={adminTheme.colors.danger} />
           <Text style={styles.signOutText}>Sign Out</Text>
         </TouchableOpacity>
       </View>
+      {signOutModal}
     </View>
   );
 }
