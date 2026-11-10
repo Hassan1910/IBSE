@@ -11,8 +11,9 @@ import {
   View,
 } from 'react-native';
 import { Image } from 'expo-image';
-import { useAuth, useUser } from '@clerk/clerk-expo';
+import { useUser } from '@clerk/clerk-expo';
 import { supabase } from '../../lib/supabase';
+import { useSignOutPrompt } from '../../hooks/useSignOutPrompt';
 import { useAudit } from '../../hooks/useAudit';
 import { pickImages, uploadImage } from '../../lib/storage';
 import { Camera, Edit2, IdCard, KeyRound, LogOut, Mail, Phone, ShieldCheck, User, Users, X } from 'lucide-react-native';
@@ -29,8 +30,8 @@ interface TenantProfileRow {
 
 export default function TenantProfile() {
   const { user } = useUser();
-  const { signOut } = useAuth();
   const { log } = useAudit();
+  const { requestSignOut, signOutModal } = useSignOutPrompt();
   const [profile, setProfile] = useState<TenantProfileRow | null>(null);
   const [loading, setLoading] = useState(true);
   const [editVisible, setEditVisible] = useState(false);
@@ -187,13 +188,6 @@ export default function TenantProfile() {
     }
   };
 
-  const handleSignOut = () => {
-    Alert.alert('Sign Out', 'Are you sure you want to sign out?', [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Sign Out', style: 'destructive', onPress: () => signOut() },
-    ]);
-  };
-
   if (loading) {
     return (
       <View style={styles.centered}>
@@ -274,10 +268,11 @@ export default function TenantProfile() {
         <Text style={styles.securityNoteText}>Keep your credentials private and update your details regularly.</Text>
       </View>
 
-      <TouchableOpacity style={styles.logoutBtn} onPress={handleSignOut}>
+      <TouchableOpacity style={styles.logoutBtn} onPress={requestSignOut}>
         <LogOut size={20} color="#EF4444" style={styles.actionIcon} />
         <Text style={styles.logoutText}>Sign Out</Text>
       </TouchableOpacity>
+      {signOutModal}
 
       <Modal animationType="slide" transparent visible={editVisible} onRequestClose={() => setEditVisible(false)}>
         <View style={styles.modalOverlay}>

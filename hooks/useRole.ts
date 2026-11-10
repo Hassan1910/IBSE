@@ -1,6 +1,7 @@
 import { useUser, useAuth } from '@clerk/clerk-expo';
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { AppState, type AppStateStatus } from 'react-native';
+import { getLocalSessionEpoch, onLocalSessionCleared } from '../lib/signOut';
 import { supabase, setSupabaseToken } from '../lib/supabase';
 
 export type UserRole = 'admin' | 'finance' | 'tenant' | 'client' | 'landlord';
@@ -23,6 +24,18 @@ export function useRole() {
   const missingProfileRetriesRef = useRef(0);
 
   useEffect(() => {
+    return onLocalSessionCleared(() => {
+      setRole(null);
+      setAccountStatus(null);
+      setError(null);
+      setLoading(false);
+      lastFetchKeyRef.current = null;
+      missingProfileRetriesRef.current = 0;
+      isFetchingRef.current = false;
+    });
+  }, []);
+
+  useEffect(() => {
     if (!isUserLoaded || !isAuthLoaded) return;
 
     if (!user) {
@@ -38,6 +51,8 @@ export function useRole() {
     if (isFetchingRef.current || lastFetchKeyRef.current === fetchKey) return;
 
     let cancelled = false;
+    const epochAtStart = getLocalSessionEpoch();
+    const stillCurrent = () => !cancelled && getLocalSessionEpoch() === epochAtStart;
     isFetchingRef.current = true;
 
     async function doFetch() {
@@ -55,7 +70,7 @@ export function useRole() {
           }
         }
 
-        if (cancelled) return;
+        if (!stillCurrent()) return;
         setSupabaseToken(token);
 
         const { data, error: sbError } = await supabase
@@ -64,7 +79,7 @@ export function useRole() {
           .eq('id', user!.id)
           .single();
 
-        if (cancelled) return;
+        if (!stillCurrent()) return;
 
         if (sbError) {
           if (sbError.code === 'PGRST116') {
@@ -75,7 +90,7 @@ export function useRole() {
             const attempt = missingProfileRetriesRef.current;
             const delay = attempt <= 6 ? 400 : Math.min(3000 + (attempt - 6) * 1000, 15000);
             setTimeout(() => {
-              if (!cancelled) setRefreshNonce((n) => n + 1);
+              if (stillCurrent()) setRefreshNonce((n) => n + 1);
             }, delay);
           } else if (sbError.code === 'PGRST301') {
             setRole(null);
@@ -94,7 +109,7 @@ export function useRole() {
           lastFetchKeyRef.current = fetchKey;
         }
       } catch (err: any) {
-        if (!cancelled) {
+        if (stillCurrent()) {
           console.error('[useRole] Unhandled exception:', err);
           setError(err.message || 'Failed to determine user role');
           setRole(null);
@@ -102,7 +117,7 @@ export function useRole() {
           lastFetchKeyRef.current = fetchKey;
         }
       } finally {
-        if (!cancelled) {
+        if (stillCurrent()) {
           setLoading(false);
           isFetchingRef.current = false;
         }

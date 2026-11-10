@@ -27,6 +27,12 @@ import {
   isPaymentResumeHeld,
 } from '../lib/authIntent';
 import { setNotificationPushNavigation } from '../lib/notificationMoneySync';
+import {
+  completeSignOut,
+  isSignOutInProgress,
+  settleSignOutGuard,
+  signOutErrorMessage,
+} from '../lib/signOut';
 import type { NotificationRole } from '../lib/notificationRoutes';
 import 'react-native-reanimated';
 
@@ -70,6 +76,18 @@ function InitialLayout() {
   const navigationState = useRootNavigationState();
   const [maintenanceBlocked, setMaintenanceBlocked] = useState(false);
   const [checkingMaintenance, setCheckingMaintenance] = useState(false);
+  const [signOutError, setSignOutError] = useState<string | null>(null);
+  const signingOutRef = useRef(false);
+
+  const handleSignOut = () => {
+    if (signingOutRef.current) return;
+    signingOutRef.current = true;
+    setSignOutError(null);
+    void completeSignOut(() => signOut()).catch((error: unknown) => {
+      signingOutRef.current = false;
+      setSignOutError(signOutErrorMessage(error));
+    });
+  };
   const accountBlocked =
     isSignedIn &&
     !!role &&
@@ -218,6 +236,18 @@ function InitialLayout() {
       // Root index (`/`) is the public listings landing — guests may stay there.
       const onPublicLanding = pathname === '/' || pathname === '';
 
+      // Sign-out clears Clerk before React re-renders. Until isSignedIn flips,
+      // the role redirect below would send the user straight back into the app.
+      if (isSignOutInProgress()) {
+        if (!isSignedIn) {
+          settleSignOutGuard();
+          if (!inAuthGroup && !onPublicLanding) {
+            router.replace('/(auth)/login');
+          }
+        }
+        return;
+      }
+
       if (!isSignedIn) {
         // Guests may browse listings or use auth screens; everything else → login
         if (!inAuthGroup && !onPublicLanding) {
@@ -332,9 +362,10 @@ function InitialLayout() {
         <Text style={styles.maintenanceBody}>
           IBSA Homes is temporarily unavailable. Please try again later, or contact support if you need urgent help.
         </Text>
-        <TouchableOpacity style={styles.maintenanceBtn} onPress={() => signOut()}>
+        <TouchableOpacity style={styles.maintenanceBtn} onPress={handleSignOut}>
           <Text style={styles.maintenanceBtnText}>Sign Out</Text>
         </TouchableOpacity>
+        {signOutError ? <Text style={styles.signOutError}>{signOutError}</Text> : null}
       </View>
     );
   }
@@ -359,9 +390,10 @@ function InitialLayout() {
             <Text style={styles.checkStatusBtnText}>Check Status</Text>
           </TouchableOpacity>
         ) : null}
-        <TouchableOpacity style={styles.maintenanceBtn} onPress={() => signOut()}>
+        <TouchableOpacity style={styles.maintenanceBtn} onPress={handleSignOut}>
           <Text style={styles.maintenanceBtnText}>Sign Out</Text>
         </TouchableOpacity>
+        {signOutError ? <Text style={styles.signOutError}>{signOutError}</Text> : null}
       </View>
     );
   }
@@ -465,6 +497,13 @@ const styles = StyleSheet.create({
     color: '#0F172A',
     fontWeight: '700',
     fontSize: 15,
+  },
+  signOutError: {
+    color: '#F87171',
+    fontSize: 14,
+    lineHeight: 20,
+    textAlign: 'center',
+    marginTop: 12,
   },
   missingKeys: {
     color: '#F87171',
